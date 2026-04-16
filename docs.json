@@ -1,5 +1,6 @@
 {
   "$schema": "https://mintlify.com/schema.json",
+  "theme": "mint",
   "name": "AINode",
   "logo": {
     "light": "/ainode-logo.png",
@@ -9,11 +10,7 @@
   "colors": {
     "primary": "#76B900",
     "light": "#9DDE00",
-    "dark": "#4A7A00",
-    "anchors": {
-      "from": "#76B900",
-      "to": "#4A7A00"
-    }
+    "dark": "#4A7A00"
   },
   "topbarLinks": [
     {
@@ -25,16 +22,6 @@
     "name": "Install Now",
     "url": "https://ainode.dev/#install"
   },
-  "tabs": [
-    {
-      "name": "Guides",
-      "url": "guides"
-    },
-    {
-      "name": "API Reference",
-      "url": "api-reference"
-    }
-  ],
   "anchors": [
     {
       "name": "ainode.dev",
