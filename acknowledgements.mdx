@@ -4,59 +4,22 @@ description: "The open-source projects and community work that AINode builds on.
 icon: "heart"
 ---
 
-## Core inference foundation
+The inference and clustering core of AINode is powered by vLLM with
+community patches. Specifically, we inherit the robust NCCL implementation
+from [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)
+(`dgxspark-3node-ring` branch), which has proven most reliable for
+Grace-Blackwell unified memory and fabric (RoCE / 400G switch) topologies.
 
-The inference engine is based on [vLLM](https://github.com/vllm-project/vllm) with
-custom patches for Grace-Blackwell (GB10) unified memory and DGX Spark topologies.
-For reliable multi-node operation on fabric (QSFP / RoCE / 400G switches), we
-incorporate the patched NCCL and cluster recipes from
-[eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker).
+We are grateful to eugr and the broader vLLM / Ray / Spark community whose
+hard work on real hardware made this project possible.
 
-eugr's Docker configuration and maintenance have become the community standard
-for DGX Spark clustering. Many of the real-world networking and performance lessons
-in AINode come directly from that work.
+## Key dependencies
 
-## What AINode adds
-
-While the low-level clustering and inference performance build on eugr's foundation,
-AINode focuses on the **full user experience**:
-
-- Unified single-container deployment with automatic peer discovery
-- Modern web UI including radial cluster topology view
-- Integrated chat, model management, and OpenAI-compatible serving
-- In-browser distributed training workflows (LoRA / QLoRA / fine-tuning with live metrics)
-- Simplified configuration and management for both solo and clustered operation
-- Prometheus metrics, version update polling, and cluster-wide update from the browser
-
-This combination lets users go from `curl | bash` to chatting with a 4-node sharded
-model — or starting a training job — without deep diving into Ray, NCCL env vars,
-or custom scripts.
-
-## Standing on shoulders
-
-We want to explicitly thank the projects and people that made building AINode possible:
-
-| Project | Contribution |
+| Project | Role |
 |---|---|
 | [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) | GB10-patched vLLM containers, NCCL 3-node ring fix, cluster recipes |
 | [vLLM](https://github.com/vllm-project/vllm) | High-performance inference engine |
 | [Ray](https://www.ray.io/) | Cross-node distributed orchestration |
 | [NCCL](https://developer.nvidia.com/nccl) | GPU-to-GPU collective communication |
 | [Hugging Face](https://huggingface.co/) | Model hub, Transformers, PEFT, Datasets |
-| [PEFT](https://github.com/huggingface/peft) | Parameter-efficient fine-tuning (LoRA, QLoRA) |
-| [bitsandbytes](https://github.com/bitsandbytes-foundation/bitsandbytes) | 4-bit NF4 quantization for QLoRA |
 | [aiohttp](https://docs.aiohttp.org/) | Async HTTP server for the API + web UI |
-
-## If you're coming from eugr
-
-If you already use `eugr/spark-vllm-docker` and want the next layer of usability,
-AINode is designed as a natural progression. Your existing fabric config, SSH setup,
-and model weights are directly compatible. AINode wraps the same inference stack in a
-managed container with a browser interface.
-
-```bash
-curl -fsSL https://ainode.dev/install | bash
-```
-
-Your existing multi-node cluster topology still works — AINode's auto-discovery
-finds the same nodes on the same fabric.

@@ -34,6 +34,11 @@
       "url": "https://github.com/getainode/ainode"
     },
     {
+      "name": "Discord",
+      "icon": "discord",
+      "url": "https://discord.gg/argentos"
+    },
+    {
       "name": "Releases",
       "icon": "tag",
       "url": "https://github.com/getainode/ainode/releases"
