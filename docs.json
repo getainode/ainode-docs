@@ -1,0 +1,109 @@
+{
+  "$schema": "https://mintlify.com/schema.json",
+  "name": "AINode",
+  "logo": {
+    "light": "/ainode-logo.png",
+    "dark": "/ainode-logo.png"
+  },
+  "favicon": "/ainode-logo.png",
+  "colors": {
+    "primary": "#76B900",
+    "light": "#9DDE00",
+    "dark": "#4A7A00",
+    "anchors": {
+      "from": "#76B900",
+      "to": "#4A7A00"
+    }
+  },
+  "topbarLinks": [
+    {
+      "name": "GitHub",
+      "url": "https://github.com/getainode/ainode"
+    }
+  ],
+  "topbarCtaButton": {
+    "name": "Install Now",
+    "url": "https://ainode.dev/#install"
+  },
+  "tabs": [
+    {
+      "name": "Guides",
+      "url": "guides"
+    },
+    {
+      "name": "API Reference",
+      "url": "api-reference"
+    }
+  ],
+  "anchors": [
+    {
+      "name": "ainode.dev",
+      "icon": "globe",
+      "url": "https://ainode.dev"
+    },
+    {
+      "name": "GitHub",
+      "icon": "github",
+      "url": "https://github.com/getainode/ainode"
+    },
+    {
+      "name": "Releases",
+      "icon": "tag",
+      "url": "https://github.com/getainode/ainode/releases"
+    }
+  ],
+  "navigation": [
+    {
+      "group": "Getting Started",
+      "pages": [
+        "introduction",
+        "quickstart",
+        "installation",
+        "cluster-setup"
+      ]
+    },
+    {
+      "group": "Guides",
+      "pages": [
+        "guides/chat",
+        "guides/models",
+        "guides/training",
+        "guides/distributed",
+        "guides/update"
+      ]
+    },
+    {
+      "group": "API Reference",
+      "pages": [
+        "api-reference/overview",
+        "api-reference/chat",
+        "api-reference/models",
+        "api-reference/training",
+        "api-reference/metrics",
+        "api-reference/cluster"
+      ]
+    },
+    {
+      "group": "Operations",
+      "pages": [
+        "ops/role",
+        "ops/release-flow",
+        "ops/networking"
+      ]
+    }
+  ],
+  "footerSocials": {
+    "github": "https://github.com/getainode",
+    "website": "https://ainode.dev"
+  },
+  "analytics": {
+    "ga4": {
+      "measurementId": "G-CNZDL1NPVP"
+    }
+  },
+  "feedback": {
+    "thumbsRating": true,
+    "suggestEdit": true,
+    "raiseIssue": true
+  }
+}

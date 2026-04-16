@@ -1,0 +1,59 @@
+---
+title: "Metrics"
+description: "Prometheus and JSON metrics endpoints."
+---
+
+## Endpoints
+
+| URL | Format | Description |
+|---|---|---|
+| `GET http://localhost:8000/metrics` | Prometheus text | Scrape target for Prometheus / Grafana |
+| `GET http://localhost:3000/api/metrics` | JSON | Full snapshot |
+| `GET http://localhost:3000/api/metrics/gpu` | JSON | GPU stats only |
+| `GET http://localhost:3000/api/metrics/requests` | JSON | Request stats with latency percentiles |
+
+## Prometheus scrape config
+
+```yaml
+scrape_configs:
+  - job_name: ainode
+    static_configs:
+      - targets: ["<node-ip>:8000"]
+```
+
+## Key metrics
+
+| Metric | Type | Description |
+|---|---|---|
+| `ainode_uptime_seconds` | counter | Seconds since process start |
+| `ainode_requests_total` | counter | Total inference requests |
+| `ainode_request_errors_total` | counter | Failed requests |
+| `ainode_tokens_generated_total` | counter | Total tokens generated |
+| `ainode_tokens_per_second` | gauge | Average throughput |
+| `ainode_request_latency_milliseconds{quantile}` | summary | P50/P95/P99 latency |
+| `ainode_requests_by_model_total{model}` | counter | Per-model request counts |
+| `ainode_gpu_utilization_percent` | gauge | GPU utilization 0–100 |
+| `ainode_gpu_memory_used_bytes` | gauge | GPU memory in use |
+| `ainode_gpu_memory_total_bytes` | gauge | Total GPU memory |
+| `ainode_gpu_temperature_celsius` | gauge | GPU temperature |
+| `ainode_build_info{version}` | gauge | Always 1; carries version label |
+
+## Recommended alerts
+
+```yaml
+# GPU memory > 95%
+- alert: AINodeGPUMemoryHigh
+  expr: ainode_gpu_memory_used_bytes / ainode_gpu_memory_total_bytes > 0.95
+
+# Error rate > 5/min
+- alert: AINodeErrorRate
+  expr: rate(ainode_request_errors_total[1m]) > 5
+
+# Temperature > 85°C
+- alert: AINodeGPUTemp
+  expr: ainode_gpu_temperature_celsius > 85
+
+# Node down
+- alert: AINodeDown
+  expr: up{job="ainode"} == 0
+```

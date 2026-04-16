@@ -1,0 +1,58 @@
+---
+title: "Release Flow"
+description: "How to build and ship a new AINode version."
+---
+
+## Decision tree
+
+| Change type | Action needed |
+|---|---|
+| `install.sh`, README, docs | `git push main` — live immediately |
+| Python or web UI code | Build new image → push → `ainode update` |
+| vLLM / Ray / base OS | Rebuild base image first, then new image |
+
+## Build a new image (aarch64 only)
+
+Must be built on Spark 1 (or any DGX Spark) — the base image requires Linux aarch64.
+
+```bash
+# 1. Bump versions
+# pyproject.toml:  version = "0.4.4"
+# ainode/__init__.py:  __version__ = "0.4.4"
+# ainode/service/systemd.py:  AINODE_IMAGE_TAG = "0.4.4"
+
+# 2. Push
+git commit -am "chore: bump to 0.4.4" && git push
+
+# 3. Build on Spark 1
+ssh sem@<spark1-ip>
+cd ~/ainode-build && git pull
+docker build \
+  -f scripts/Dockerfile.ainode \
+  --build-arg BASE_IMAGE=ghcr.io/getainode/ainode-base:c026c92 \
+  -t ghcr.io/getainode/ainode:0.4.4 \
+  -t ghcr.io/getainode/ainode:latest \
+  .
+
+# 4. Smoke test
+docker run --rm --entrypoint ainode ghcr.io/getainode/ainode:0.4.4 --version
+
+# 5. Push
+docker push ghcr.io/getainode/ainode:0.4.4
+docker push ghcr.io/getainode/ainode:latest
+docker push argentaios/ainode:0.4.4
+docker push argentaios/ainode:latest
+
+# 6. GitHub release
+git tag v0.4.4 && git push origin v0.4.4
+gh release create v0.4.4 --generate-notes
+
+# 7. Upgrade nodes
+ainode update   # on each node
+```
+
+## Rollback
+
+```bash
+AINODE_IMAGE=ghcr.io/getainode/ainode:0.4.3 ainode update
+```

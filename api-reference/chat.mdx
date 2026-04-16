@@ -1,0 +1,58 @@
+---
+title: "Chat & Completions"
+description: "OpenAI-compatible inference endpoints."
+---
+
+All inference endpoints are on port **8000** and follow the OpenAI API spec exactly.
+
+## Chat completions
+
+`POST http://localhost:8000/v1/chat/completions`
+
+```json
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "Hello!"}
+  ],
+  "stream": false,
+  "temperature": 0.7,
+  "max_tokens": 512
+}
+```
+
+## Streaming
+
+Set `"stream": true` — response is server-sent events, same as OpenAI.
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen2.5-7B-Instruct", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'
+```
+
+## Embeddings
+
+`POST http://localhost:8000/v1/embeddings`
+
+```json
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "input": "The quick brown fox"
+}
+```
+
+## List models
+
+`GET http://localhost:8000/v1/models`
+
+Returns the currently loaded model(s).
+
+## Compatible clients
+
+- Python: `openai` SDK, `langchain`, `litellm`
+- Node.js: `openai` npm package
+- Go: `sashabaranov/go-openai`
+- Open WebUI: set base URL to `http://localhost:8000/v1`
+- Anything else that speaks OpenAI

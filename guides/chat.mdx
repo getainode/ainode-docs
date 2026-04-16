@@ -1,0 +1,46 @@
+---
+title: "Chat"
+description: "Browser-based chat with any loaded model."
+icon: "message"
+---
+
+The **Chat** tab gives you a streaming conversation interface with the currently loaded model.
+
+## Features
+
+- Streaming responses (server-sent events)
+- Multi-turn conversations
+- System prompt editor
+- Code blocks with syntax highlighting
+- Image drag-and-drop
+- Stop generation mid-stream
+- TTFT and tokens/sec metrics
+
+## Switching models
+
+Use the model selector in the chat toolbar. Only models currently loaded in vLLM appear here. To load a different model, go to **Downloads** → find the model → **Launch Model**.
+
+## API (OpenAI-compatible)
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-needed")
+
+# Streaming
+for chunk in client.chat.completions.create(
+    model="Qwen/Qwen2.5-7B-Instruct",
+    messages=[{"role": "user", "content": "Explain NCCL in one paragraph."}],
+    stream=True,
+):
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+Works with Open WebUI, LiteLLM, LangChain, and any other OpenAI-compatible client.
+
+## Embeddings
+
+```bash
+curl http://localhost:8000/v1/embeddings \
+  -d '{"model": "Qwen/Qwen2.5-7B-Instruct", "input": "Hello world"}'
+```

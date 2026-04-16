@@ -1,0 +1,106 @@
+---
+title: "Fine-Tuning"
+description: "Train and fine-tune models from the browser. No notebooks, no cloud bills."
+icon: "brain"
+---
+
+## Methods
+
+| Method | Memory | When to use |
+|---|---|---|
+| **LoRA** | Low — bf16 base + adapters | Most fine-tunes |
+| **QLoRA** | Lowest — 4-bit NF4 base + adapters | Large models on memory-constrained nodes |
+| **Full** | High — all weights updated | Best quality, 128+ GB VRAM |
+
+## Workflow
+
+### 1. Upload a dataset
+
+Supported formats: JSONL, JSON, CSV. Field schemas auto-detected:
+
+```jsonl
+{"text": "full training text"}
+{"instruction": "...", "output": "..."}
+{"prompt": "...", "completion": "..."}
+```
+
+Or reference a Hugging Face dataset by ID (`tatsu-lab/alpaca`).
+
+### 2. Launch the wizard
+
+**Training** tab → **New Training Run** → 5-step wizard:
+Model → Dataset → Method → Distribution → Review
+
+### 3. Monitor progress
+
+Live loss chart, progress bar, log tail. Cancel anytime — saves the last checkpoint.
+
+### 4. Retrieve artifacts
+
+**View Output** on a completed run lists all files for download:
+- `adapter_model.safetensors`
+- `config.json`, `tokenizer.json`
+- `checkpoint-N/` subdirs
+
+### 5. Merge LoRA (optional)
+
+Click **Merge Adapter** to merge LoRA weights into the base model via `PEFT.merge_and_unload()`. The merged model can be loaded directly into vLLM.
+
+### 6. Resume from checkpoint
+
+If a run fails or is cancelled, click **Resume** — AINode finds the latest checkpoint and continues.
+
+## Configuration
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `num_epochs` | 3 | |
+| `batch_size` | 4 | Reduce if OOM |
+| `learning_rate` | 2e-4 | Use 5e-5 for full fine-tune |
+| `lora_rank` | 16 | Higher = more capacity, more VRAM |
+| `max_seq_length` | 2048 | |
+| `eval_split` | 0.1 | 0 to disable evaluation |
+| `wandb_project` | — | Enable W&B logging |
+| `use_gradient_checkpointing` | false | Saves VRAM at cost of speed |
+
+Click **★ Smart Defaults** in the wizard to auto-fill based on your model and method.
+
+## Gated models (Llama, Gemma)
+
+```bash
+ainode config --hf-token hf_xxxxxxxxxxxxxxxx
+sudo systemctl restart ainode
+```
+
+The token propagates automatically to all training jobs.
+
+## API
+
+```bash
+# Submit
+curl -X POST http://localhost:3000/api/training/jobs \
+  -d '{"base_model": "Qwen/Qwen2.5-7B-Instruct", "dataset_path": "data.jsonl", "method": "lora"}'
+
+# Status
+curl http://localhost:3000/api/training/jobs/{job_id}
+
+# List output files
+curl http://localhost:3000/api/training/jobs/{job_id}/output
+
+# Download adapter
+curl -O http://localhost:3000/api/training/jobs/{job_id}/output/adapter_model.safetensors
+
+# Merge LoRA into base
+curl -X POST http://localhost:3000/api/training/jobs/{job_id}/merge
+
+# Resume from checkpoint
+curl -X POST http://localhost:3000/api/training/jobs/{job_id}/resume
+```
+
+## Troubleshooting
+
+**CUDA out of memory** — Lower `batch_size` to 1–2, enable `use_gradient_checkpointing`, or switch to QLoRA.
+
+**DDP hangs** — Ensure `MASTER_ADDR` is set and reachable on the cluster fabric. Don't use Tailscale IPs for NCCL.
+
+**401 from Hugging Face** — Run `ainode config --hf-token hf_xxx`.

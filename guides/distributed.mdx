@@ -1,0 +1,52 @@
+---
+title: "Distributed Inference"
+description: "Shard one large model across multiple GB10 nodes."
+icon: "network-wired"
+---
+
+## How it works
+
+AINode uses Ray for cross-node orchestration and NCCL for GPU-to-GPU tensor communication. The head node:
+
+1. Discovers workers via UDP broadcast
+2. SSHes into each peer and starts a vLLM worker container
+3. Forms a Ray cluster
+4. Launches vLLM with `--tensor-parallel-size N`
+
+Each GPU holds `1/N` of the model weights. All-reduce collectives run over NCCL, preferring RoCE (RDMA) at 200 Gbps when ConnectX-7 hardware is present.
+
+## Verified configurations
+
+| Config | Total VRAM | Models |
+|---|---|---|
+| 2× DGX Spark (TP=2) | 244 GB | Llama 3.1 70B fp16 |
+| 4× DGX Spark + ASUS (TP=4) | 487 GB | Llama 3.1 405B AWQ |
+
+## Critical: single NIC per cluster subnet
+
+Each node must have exactly **one NIC with an IP on the cluster subnet**. Multiple NICs on the same subnet cause Ray placement group hangs with no error message.
+
+```bash
+# Verify — should show exactly one IP on your cluster subnet
+ip addr | grep "10.0.0\|192.168.0"
+```
+
+## NCCL transport verification
+
+After launching a distributed job, check vLLM worker logs:
+
+```bash
+ainode logs -f | grep "Using network"
+# Expected: "Using network IB" + "mlx5_0:1/RoCE ... speed=200000"
+# Bad: "Using network Socket"  ← 10x slower, check ConnectX-7 cabling
+```
+
+## GPU Direct RDMA (optional speedup)
+
+```bash
+# Load peermem module on each host (not in container)
+sudo modprobe nvidia-peermem
+
+# Verify NCCL picks it up on next launch
+ainode logs -f | grep "GPU Direct RDMA"
+```

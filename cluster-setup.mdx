@@ -1,0 +1,65 @@
+---
+title: "Cluster Setup"
+description: "Connect multiple GB10 nodes into a single AI cluster with 487+ GB VRAM."
+---
+
+## Overview
+
+AINode discovers peers automatically via UDP broadcast on port 5679. Once discovered, the master can shard one large model across all GPUs using tensor-parallel inference over NCCL.
+
+**Verified: 4× DGX Spark, 487 GB aggregated VRAM, NCCL over RoCE at 200 Gbps.**
+
+## Step 1: Install on each node
+
+```bash
+# Master node
+curl -fsSL https://ainode.dev/install | bash -s -- --job master
+
+# Each worker node
+curl -fsSL https://ainode.dev/install | bash -s -- --job worker
+```
+
+## Step 2: Open the cluster UI
+
+Navigate to `http://<master-ip>:3000` → **Cluster** tab. Nodes appear automatically as they start broadcasting.
+
+## Step 3: Launch distributed inference
+
+1. Go to **Config** → **Cluster**
+2. Set **Minimum Nodes** to the desired count
+3. Pick **Tensor Parallel** mode
+4. Click **Launch**
+
+The master SSHes into each worker, forms a Ray cluster, and starts vLLM with TP=N.
+
+## Network requirements
+
+| Requirement | Why |
+|---|---|
+| Passwordless SSH between nodes | eugr's launcher SSHes into each peer |
+| One NIC per cluster subnet | Multi-NIC routing ambiguity causes NCCL hangs |
+| UDP port 5679 open on cluster subnet | Peer discovery |
+| TCP ports 6379, 10001–10009, 29500 | Ray + NCCL rendezvous |
+
+<Warning>
+Use the direct fabric NIC (ConnectX-7 / `enP2p1s0f1np1`) for NCCL, not Tailscale. Tailscale adds ~2ms RTT which degrades throughput significantly.
+</Warning>
+
+## VRAM reference
+
+| Nodes | Aggregated VRAM | Largest model |
+|---|---|---|
+| 1× GB10 | 122 GB | Llama 3.1 70B (fp16) |
+| 2× GB10 | 244 GB | Llama 3.1 70B (fp16) |
+| 4× GB10 | 487 GB | Llama 3.1 405B (AWQ) |
+
+## Troubleshooting
+
+**Ray placement group hangs indefinitely**  
+More than one NIC has an IP on the cluster subnet. Remove the extra IP or set `NCCL_SOCKET_IFNAME` explicitly in the cluster config.
+
+**NCCL using socket transport instead of RoCE**  
+Check with `ainode logs -f | grep "Using network"`. Should say `NET/IB RoCE`. If it says `Socket`, the mlx5 driver isn't loaded or the ConnectX-7 isn't on the cluster fabric.
+
+**Workers not appearing in topology**  
+Confirm UDP port 5679 is open. All nodes must be on the same broadcast domain (same L2 subnet).

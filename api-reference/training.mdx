@@ -1,0 +1,110 @@
+---
+title: "Training API"
+description: "Submit, monitor, and retrieve fine-tuning jobs via REST."
+---
+
+## Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/training/jobs` | Submit a new training job |
+| GET | `/api/training/jobs` | List all jobs |
+| GET | `/api/training/jobs/{id}` | Job status + progress |
+| DELETE | `/api/training/jobs/{id}` | Cancel a job |
+| GET | `/api/training/jobs/{id}/logs` | Tail logs (`?tail=N`) |
+| GET | `/api/training/jobs/{id}/output` | List output artifacts |
+| GET | `/api/training/jobs/{id}/output/{file}` | Download an artifact |
+| POST | `/api/training/jobs/{id}/merge` | Merge LoRA into base model |
+| POST | `/api/training/jobs/{id}/resume` | Resume from checkpoint |
+| GET | `/api/training/templates` | List templates (built-in + custom) |
+| POST | `/api/training/templates` | Save a custom template |
+| GET | `/api/training/stats` | Aggregate counters |
+| POST | `/api/training/estimate` | Memory/time estimates |
+
+## Submit a job
+
+```bash
+curl -X POST http://localhost:3000/api/training/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "base_model": "Qwen/Qwen2.5-7B-Instruct",
+    "dataset_path": "alpaca.jsonl",
+    "method": "lora",
+    "num_epochs": 3,
+    "batch_size": 4,
+    "lora_rank": 16,
+    "eval_split": 0.1
+  }'
+```
+
+Response:
+
+```json
+{
+  "job_id": "abc123",
+  "status": "pending",
+  "config": { "base_model": "...", "method": "lora", ... }
+}
+```
+
+## Training config fields
+
+```json
+{
+  "base_model": "Qwen/Qwen2.5-7B-Instruct",
+  "dataset_path": "path/or/hf-dataset-id",
+  "method": "lora",
+  "num_epochs": 3,
+  "batch_size": 4,
+  "learning_rate": 0.0002,
+  "lora_rank": 16,
+  "lora_alpha": 32,
+  "max_seq_length": 2048,
+  "eval_split": 0.1,
+  "eval_steps": 0,
+  "use_gradient_checkpointing": false,
+  "distributed": false,
+  "num_nodes": 1,
+  "hf_token": "hf_xxx",
+  "wandb_project": "my-project",
+  "run_name": "alpaca-7b-run1"
+}
+```
+
+## List output artifacts
+
+```bash
+curl http://localhost:3000/api/training/jobs/abc123/output
+```
+
+```json
+{
+  "job_id": "abc123",
+  "status": "completed",
+  "files": [
+    {"name": "adapter_model.safetensors", "size_mb": 142.3, "download_url": "..."},
+    {"name": "config.json", "size_mb": 0.01, "download_url": "..."}
+  ],
+  "total_files": 2,
+  "total_size_mb": 142.31
+}
+```
+
+## Merge LoRA adapter
+
+```bash
+curl -X POST http://localhost:3000/api/training/jobs/abc123/merge
+```
+
+Returns a `merge_job_id` to poll with `GET /api/training/jobs/{merge_job_id}`.
+
+## Resume from checkpoint
+
+```bash
+# Use latest checkpoint
+curl -X POST http://localhost:3000/api/training/jobs/abc123/resume
+
+# Specify a checkpoint
+curl -X POST http://localhost:3000/api/training/jobs/abc123/resume \
+  -d '{"checkpoint": "checkpoint-500"}'
+```

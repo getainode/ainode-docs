@@ -1,0 +1,50 @@
+---
+title: "Cluster API"
+description: "Inspect and manage the multi-node cluster."
+---
+
+## Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/nodes` | All discovered nodes |
+| GET | `/api/cluster/resources` | Aggregated VRAM + GPU counts |
+| GET | `/api/cluster/info` | Cluster topology |
+| GET | `/api/status` | This node's status |
+| POST | `/api/cluster/role` | Set distributed role |
+
+## Node status
+
+```bash
+curl http://localhost:3000/api/nodes
+```
+
+```json
+{
+  "nodes": [
+    {
+      "node_id": "spark1-head",
+      "node_name": "spark-dgx-1",
+      "status": "online",
+      "engine_ready": true,
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "gpu_name": "NVIDIA GB10",
+      "gpu_memory_gb": 121.7
+    }
+  ]
+}
+```
+
+## Cluster resources
+
+```bash
+curl http://localhost:3000/api/cluster/resources
+```
+
+```json
+{
+  "total_nodes": 4,
+  "total_gpus": 4,
+  "total_vram_gb": 487
+}
+```

@@ -1,0 +1,52 @@
+---
+title: "Models"
+description: "Download, manage, and launch models from the browser."
+icon: "cube"
+---
+
+## Downloading models
+
+Open the **Downloads** tab. Three ways to add a model:
+
+1. **Catalog** — 50+ curated models, click to download
+2. **Search** — search Hugging Face live
+3. **Custom** — paste any HF repo ID (e.g. `microsoft/Phi-4`)
+
+Downloads run in the background with a progress bar. Click **✕** to cancel.
+
+## Launching a model
+
+Once downloaded, click the model card → **▶ Launch Model**. AINode saves the model to config and restarts the engine.
+
+## Gated models
+
+Llama, Gemma, and other gated repos require a Hugging Face token:
+
+```bash
+ainode config --hf-token hf_xxxxxxxxxxxxxxxx
+```
+
+## Supported models
+
+Any model compatible with vLLM works. Tested models include:
+
+- Meta Llama 3 / 3.1 (8B, 70B, 405B)
+- Qwen 2.5 (0.5B → 72B)
+- Mistral / Mixtral
+- Google Gemma 2
+- DeepSeek V3
+- Phi-3 / Phi-4
+- Command R+
+
+## Shared storage across cluster
+
+To avoid downloading the same model on every node, mount a shared NFS path:
+
+```json
+// ~/.ainode/config.json on each node
+{
+  "models_dir": "/mnt/shared-models"
+}
+```
+
+See [Cluster Setup](/cluster-setup) for NFS configuration details.

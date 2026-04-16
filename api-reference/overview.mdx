@@ -1,0 +1,45 @@
+---
+title: "API Overview"
+description: "AINode exposes an OpenAI-compatible API on port 8000 and a management API on port 3000."
+---
+
+## Base URLs
+
+| Purpose | URL |
+|---|---|
+| Inference (OpenAI-compatible) | `http://localhost:8000/v1` |
+| Management API | `http://localhost:3000/api` |
+| Prometheus metrics | `http://localhost:8000/metrics` |
+
+## Authentication
+
+Disabled by default. Enable for internet-exposed instances:
+
+```bash
+ainode auth enable    # generates an API key
+ainode auth new-key   # rotate
+```
+
+Pass the key as `Authorization: Bearer <key>` on all `/v1/*` requests.
+
+## OpenAI-compatible endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/v1/chat/completions` | POST | Chat completions (streaming supported) |
+| `/v1/completions` | POST | Text completions |
+| `/v1/embeddings` | POST | Embeddings |
+| `/v1/models` | GET | List loaded models |
+
+## Management endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/status` | Node status, GPU info, engine state |
+| `GET /api/nodes` | All discovered cluster nodes |
+| `GET /api/cluster/resources` | Aggregated VRAM across cluster |
+| `GET /api/metrics` | JSON metrics snapshot |
+| `GET /metrics` | Prometheus text exposition |
+| `POST /api/engine/set-model` | Switch active model |
+| `POST /api/engine/update` | Trigger `docker pull + restart` |
+| `GET /api/version/check` | Check for newer version on GHCR |

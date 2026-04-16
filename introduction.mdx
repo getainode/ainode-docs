@@ -1,0 +1,77 @@
+---
+title: "What is AINode?"
+description: "Turn any NVIDIA GPU into a complete local AI platform."
+---
+
+<img
+  src="/ainode-logo.png"
+  alt="AINode"
+  width="120"
+  style={{ margin: "0 auto 2rem", display: "block" }}
+/>
+
+AINode is a free, open-source platform that turns any NVIDIA GPU machine into a complete local AI stack — browser chat UI, OpenAI-compatible API, LoRA fine-tuning, and automatic multi-node clustering over NCCL.
+
+**One command to install. No cloud. No monthly bill.**
+
+```bash
+curl -fsSL https://ainode.dev/install | bash
+```
+
+---
+
+## Key capabilities
+
+<CardGroup cols={2}>
+  <Card title="Chat UI" icon="message" href="/guides/chat">
+    Browser-based streaming chat on port 3000. Works with any loaded model.
+  </Card>
+  <Card title="OpenAI-compatible API" icon="code" href="/api-reference/chat">
+    Drop-in `/v1` endpoints on port 8000. Works with LangChain, Open WebUI, and any OpenAI client.
+  </Card>
+  <Card title="Model downloads" icon="download" href="/guides/models">
+    50+ models from the built-in catalog. Paste any Hugging Face repo ID.
+  </Card>
+  <Card title="Fine-tuning" icon="brain" href="/guides/training">
+    LoRA, QLoRA, and full fine-tune from the browser. No notebooks.
+  </Card>
+  <Card title="Multi-node clustering" icon="server" href="/guides/distributed">
+    Automatic peer discovery. One model sharded across all GPUs in the cluster.
+  </Card>
+  <Card title="Prometheus metrics" icon="chart-line" href="/api-reference/metrics">
+    `/metrics` endpoint for Grafana, Prometheus, VictoriaMetrics.
+  </Card>
+</CardGroup>
+
+---
+
+## Verified hardware
+
+| Hardware | GPU memory | Status |
+|---|---|---|
+| NVIDIA DGX Spark (GB10) | 128 GB unified | ✅ Verified — TP=4, 487 GB cluster |
+| ASUS GX10 (GB10) | 128 GB unified | ✅ Verified |
+| Any Linux + NVIDIA GPU | 8 GB minimum | ✅ Supported |
+
+---
+
+## Architecture
+
+AINode ships as a single unified container image. Every node in the cluster runs the same image.
+
+```
+ghcr.io/getainode/ainode:latest   ← pulled by the installer
+         │
+         ├── aiohttp web server (chat UI + API proxy, port 3000 / 8000)
+         ├── vLLM inference engine (launched as subprocess)
+         ├── UDP discovery broadcaster (port 5679)
+         └── training pipeline (LoRA / QLoRA / Full)
+```
+
+No host Python venv. No source builds. Upgrade is `ainode update`.
+
+---
+
+## License
+
+Apache 2.0. Free forever. Powered by [argentos.ai](https://argentos.ai).

@@ -1,0 +1,49 @@
+---
+title: "Networking"
+description: "Port requirements, NIC rules, and NCCL tuning."
+---
+
+## Ports
+
+| Port | Protocol | Service |
+|---|---|---|
+| 3000 | TCP | AINode web UI + management API |
+| 8000 | TCP | Inference API + Prometheus metrics |
+| 5679 | UDP | Peer discovery broadcast |
+| 6379 | TCP | Ray head |
+| 10001–10009 | TCP | Ray workers |
+| 29500 | TCP | NCCL rendezvous |
+
+## Critical: single NIC per cluster subnet
+
+Each node must have **exactly one NIC** with an IP on the cluster subnet. Multiple NICs on the same subnet cause Ray placement group creation to hang indefinitely with no error message.
+
+```bash
+# Check — should show ONE IP on your cluster subnet
+ip addr | grep 192.168.0
+```
+
+## NCCL interface selection
+
+Set in `~/.ainode/config.json`:
+
+```json
+{"cluster_interface": "enP2p1s0f1np1"}
+```
+
+AINode sets `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `UCX_NET_DEVICES`, and `NCCL_IB_HCA` automatically from this value.
+
+## RoCE tuning (ConnectX-7)
+
+```bash
+# Verify NCCL is using RoCE
+ainode logs -f | grep "Using network"
+# Expected: "NET/IB ... mlx5_0:1/RoCE ... speed=200000"
+
+# Optional: enable GPU Direct RDMA
+sudo modprobe nvidia-peermem
+```
+
+## Tailscale
+
+Use Tailscale for management SSH only. **Never use Tailscale IPs for NCCL** — the ~2ms RTT collapses multi-GPU throughput.

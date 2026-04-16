@@ -1,0 +1,41 @@
+---
+title: "Updating AINode"
+description: "Upgrade to the latest version with one command."
+icon: "arrow-up"
+---
+
+## Update from CLI
+
+```bash
+ainode update
+```
+
+Pulls `ghcr.io/getainode/ainode:latest` and restarts the systemd service. Models, config, and training artifacts are never touched.
+
+## Update from browser
+
+When a new version is available, a pulsing green **⬆ Update available: vX.Y.Z** badge appears in the top bar. Click it to update in place.
+
+## Pin a specific version
+
+```bash
+AINODE_IMAGE=ghcr.io/getainode/ainode:0.4.3 ainode update
+```
+
+## Rollback
+
+```bash
+AINODE_IMAGE=ghcr.io/getainode/ainode:0.4.2 ainode update
+```
+
+## Check current version
+
+```bash
+ainode --version
+# → ainode 0.4.3
+```
+
+## Release notes
+
+All releases: [github.com/getainode/ainode/releases](https://github.com/getainode/ainode/releases)  
+Changelog: [CHANGELOG.md](https://github.com/getainode/ainode/blob/main/CHANGELOG.md)

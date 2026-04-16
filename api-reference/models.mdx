@@ -1,0 +1,44 @@
+---
+title: "Models API"
+description: "List, download, and manage models via REST."
+---
+
+## Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/models` | Full model catalog |
+| GET | `/api/models/downloaded` | Models present on disk |
+| GET | `/api/models/downloads/active` | In-progress downloads |
+| POST | `/api/models/download-repo` | Start a download by HF repo ID |
+| POST | `/api/models/download-cancel` | Cancel an in-progress download |
+| DELETE | `/api/models/{model_id}` | Delete a downloaded model |
+| POST | `/api/engine/set-model` | Switch active model + restart engine |
+
+## Download a model
+
+```bash
+curl -X POST http://localhost:3000/api/models/download-repo \
+  -H "Content-Type: application/json" \
+  -d '{"hf_repo": "Qwen/Qwen2.5-7B-Instruct"}'
+```
+
+Returns `{"job_id": "...", "status": "downloading"}`.
+
+## Cancel a download
+
+```bash
+curl -X POST http://localhost:3000/api/models/download-cancel \
+  -d '{"job_id": "<job_id>"}'
+```
+
+Stops the download and cleans up partial files.
+
+## Switch active model
+
+```bash
+curl -X POST http://localhost:3000/api/engine/set-model \
+  -d '{"model": "Qwen/Qwen2.5-7B-Instruct"}'
+```
+
+Saves to config and restarts the vLLM engine.

@@ -1,0 +1,33 @@
+---
+title: "Node Roles"
+description: "Configure a node as master, worker, or solo."
+---
+
+## Roles
+
+| Role | Command | Behavior |
+|---|---|---|
+| **master** | `ainode role master` | Runs vLLM, manages cluster, serves chat UI |
+| **worker** | `ainode role worker` | No engine — starts instantly, waits for master to assign work |
+| **solo** | `ainode role solo` | Standalone node, no clustering (default) |
+
+## Set at install time
+
+```bash
+curl -fsSL https://ainode.dev/install | bash -s -- --job master
+curl -fsSL https://ainode.dev/install | bash -s -- --job worker
+```
+
+## Change after install
+
+```bash
+ainode role worker
+sudo systemctl restart ainode
+```
+
+## Check current role
+
+```bash
+ainode role
+# → This node is: master  (distributed_mode=head)
+```

@@ -1,0 +1,58 @@
+---
+title: "Quickstart"
+description: "Up and running in under 60 seconds."
+---
+
+## Prerequisites
+
+- Linux (Ubuntu 22.04+)
+- NVIDIA GPU with CUDA 13 drivers
+- [Docker Engine](https://docs.docker.com/engine/install/)
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
+
+## Install
+
+```bash
+curl -fsSL https://ainode.dev/install | bash
+```
+
+The installer:
+1. Pulls `ghcr.io/getainode/ainode:latest` (~18 GB, one-time)
+2. Writes `/etc/systemd/system/ainode.service`
+3. Installs `/usr/local/bin/ainode` host wrapper
+4. Starts the service
+
+## Open the UI
+
+```
+http://localhost:3000
+```
+
+First visit runs onboarding — pick a model and AINode starts loading it in the background. The UI is available immediately; the chat activates once the model finishes loading.
+
+## API
+
+```bash
+curl http://localhost:8000/v1/models
+```
+
+The API is OpenAI-compatible. Point any OpenAI client at `http://localhost:8000/v1`.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-needed")
+resp = client.chat.completions.create(
+    model="Qwen/Qwen2.5-7B-Instruct",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(resp.choices[0].message.content)
+```
+
+## Upgrade
+
+```bash
+ainode update
+```
+
+Pulls `:latest` and restarts the service. Your models, config, and training runs are never touched.

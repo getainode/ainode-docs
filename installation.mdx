@@ -1,0 +1,64 @@
+---
+title: "Installation"
+description: "Install AINode on a single node or a multi-node cluster."
+---
+
+## Single node
+
+```bash
+curl -fsSL https://ainode.dev/install | bash
+```
+
+## Multi-node cluster
+
+```bash
+# On the head node — bootstraps SSH to peers automatically
+AINODE_PEERS="10.0.0.2,10.0.0.3" curl -fsSL https://ainode.dev/install | bash -s -- --job master
+
+# On each worker node
+curl -fsSL https://ainode.dev/install | bash -s -- --job worker
+```
+
+Worker nodes start instantly with no model — they announce themselves to the master and wait for work.
+
+## Node roles
+
+| Flag | Role | Behavior |
+|---|---|---|
+| `--job master` | Head node | Runs the inference engine, manages the cluster |
+| `--job worker` | Worker node | No model, no engine — waits for the master |
+| _(none)_ | Solo | Standalone, no clustering |
+
+Change role after install:
+
+```bash
+ainode role master   # or worker / solo
+sudo systemctl restart ainode
+```
+
+## Uninstall
+
+```bash
+curl -fsSL https://ainode.dev/uninstall | bash          # keeps ~/.ainode data
+curl -fsSL https://ainode.dev/uninstall | bash --purge  # deletes everything
+```
+
+## Container images
+
+Both registries serve identical images. GHCR is canonical (what the installer uses).
+
+```bash
+docker pull ghcr.io/getainode/ainode:latest    # canonical
+docker pull argentaios/ainode:latest            # Docker Hub mirror
+```
+
+## What gets installed
+
+| Path | Purpose |
+|---|---|
+| `/etc/systemd/system/ainode.service` | Systemd unit — auto-starts on boot |
+| `/usr/local/bin/ainode` | Host wrapper CLI |
+| `~/.ainode/config.json` | Node configuration |
+| `~/.ainode/models/` | Downloaded model weights |
+| `~/.ainode/logs/` | Engine logs |
+| `~/.ainode/training/` | Fine-tune artifacts |
