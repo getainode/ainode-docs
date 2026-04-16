@@ -1,0 +1,95 @@
+---
+title: "Troubleshooting"
+description: "Common issues and fixes."
+icon: "wrench"
+---
+
+## Engine fails to start
+
+**Symptom:** `Engine failed to become ready within 5 minutes` in the logs.
+
+Check `ainode logs -f` for the specific error.
+
+### AWQ model crash on GB10 (sm_12.1)
+
+```
+RuntimeError: Engine core initialization failed.
+quantization=awq_marlin
+```
+
+**Cause:** vLLM auto-upgrades AWQ models to `awq_marlin`. The Marlin CUDA kernels aren't compiled for GB10 (sm_12.1) in the current base image.
+
+**Fix (v0.4.4+):** AINode now pins `--quantization awq` automatically for AWQ model names. Run `ainode update` to get the fix.
+
+**Fix (immediate):** Switch to the non-AWQ variant:
+
+```bash
+ainode config --model Qwen/Qwen2.5-7B-Instruct   # no AWQ suffix
+sudo systemctl restart ainode
+```
+
+### Gated model 401 error
+
+```
+GatedRepoError: 401 Client Error — Access to model meta-llama/... is restricted
+```
+
+**Fix:**
+
+```bash
+ainode config --hf-token hf_xxxxxxxxxxxxxxxx
+sudo systemctl restart ainode
+```
+
+### CUDA out of memory
+
+**Fix:** Reduce `batch_size`, enable gradient checkpointing, or switch to a smaller model / QLoRA.
+
+## Model downloaded but not showing in chat
+
+The chat selector only shows models currently **loaded** in vLLM. A downloaded model that isn't running won't appear.
+
+**Fix:** Go to Downloads → find the model → click **▶ Launch Model**.
+
+## Workers not appearing in topology
+
+- Confirm UDP port 5679 is open between nodes
+- All nodes must be on the same L2 subnet (broadcast domain)
+- Check that `cluster_id` matches in `~/.ainode/config.json` on all nodes
+
+## Cluster update fails on a node
+
+If `⬆ Update all` shows a node as failed:
+
+```bash
+# SSH into the node directly and run manually
+ainode update
+```
+
+Common causes: SSH key not set up, node unreachable, disk full.
+
+## Ray placement group hangs (distributed inference)
+
+Each node must have **exactly one NIC** with an IP on the cluster subnet. Multiple NICs on the same subnet cause silent hangs.
+
+```bash
+# Check — should show ONE IP
+ip addr | grep 10.0.0
+```
+
+## pynvml FutureWarning in logs
+
+This warning is suppressed as of v0.4.1. Run `ainode update` to get the fix.
+
+## Install fails: `docker daemon not reachable`
+
+```bash
+sudo systemctl start docker
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+## Getting help
+
+- [GitHub Issues](https://github.com/getainode/ainode/issues) — file a bug
+- [Releases](https://github.com/getainode/ainode/releases) — check if your issue is already fixed

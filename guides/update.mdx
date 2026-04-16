@@ -1,10 +1,10 @@
 ---
 title: "Updating AINode"
-description: "Upgrade to the latest version with one command."
+description: "Upgrade to the latest version — from the CLI, browser, or across the whole cluster."
 icon: "arrow-up"
 ---
 
-## Update from CLI
+## Update a single node (CLI)
 
 ```bash
 ainode update
@@ -12,30 +12,40 @@ ainode update
 
 Pulls `ghcr.io/getainode/ainode:latest` and restarts the systemd service. Models, config, and training artifacts are never touched.
 
-## Update from browser
+## Update from the browser
 
-When a new version is available, a pulsing green **⬆ Update available: vX.Y.Z** badge appears in the top bar. Click it to update in place.
+When a newer version is available on GHCR, a pulsing **⬆ Update available: vX.Y.Z** badge appears in the top bar of the web UI. Click it to update in place — no terminal needed.
+
+## Update the entire cluster at once
+
+From the master node's web UI, the **CLUSTER pill** (top of the topology view) has an **⬆ Update all** button. Click it to:
+
+1. SSH into every discovered worker in parallel and run `docker pull + systemctl restart`
+2. Update the master node itself last
+3. Watch per-node progress live (pending → updating → done / failed)
+
+This is the recommended way to keep a multi-node cluster in sync.
 
 ## Pin a specific version
 
 ```bash
-AINODE_IMAGE=ghcr.io/getainode/ainode:0.4.3 ainode update
+AINODE_IMAGE=ghcr.io/getainode/ainode:0.4.4 ainode update
 ```
 
 ## Rollback
 
 ```bash
-AINODE_IMAGE=ghcr.io/getainode/ainode:0.4.2 ainode update
+AINODE_IMAGE=ghcr.io/getainode/ainode:0.4.3 ainode update
 ```
 
 ## Check current version
 
 ```bash
 ainode --version
-# → ainode 0.4.3
+# → ainode 0.4.4
 ```
 
-## Release notes
+## Version history
 
-All releases: [github.com/getainode/ainode/releases](https://github.com/getainode/ainode/releases)  
-Changelog: [CHANGELOG.md](https://github.com/getainode/ainode/blob/main/CHANGELOG.md)
+- [CHANGELOG](https://github.com/getainode/ainode/blob/main/CHANGELOG.md)
+- [All releases](https://github.com/getainode/ainode/releases)
