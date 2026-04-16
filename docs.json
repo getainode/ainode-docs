@@ -39,46 +39,58 @@
       "url": "https://github.com/getainode/ainode/releases"
     }
   ],
-  "navigation": [
-    {
-      "group": "Getting Started",
-      "pages": [
-        "introduction",
-        "quickstart",
-        "installation",
-        "cluster-setup"
-      ]
-    },
-    {
-      "group": "Guides",
-      "pages": [
-        "guides/chat",
-        "guides/models",
-        "guides/training",
-        "guides/distributed",
-        "guides/update"
-      ]
-    },
-    {
-      "group": "API Reference",
-      "pages": [
-        "api-reference/overview",
-        "api-reference/chat",
-        "api-reference/models",
-        "api-reference/training",
-        "api-reference/metrics",
-        "api-reference/cluster"
-      ]
-    },
-    {
-      "group": "Operations",
-      "pages": [
-        "ops/role",
-        "ops/release-flow",
-        "ops/networking"
-      ]
-    }
-  ],
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation",
+              "cluster-setup"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/chat",
+              "guides/models",
+              "guides/training",
+              "guides/distributed",
+              "guides/update"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "ops/role",
+              "ops/networking",
+              "ops/release-flow"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "API Reference",
+            "pages": [
+              "api-reference/overview",
+              "api-reference/chat",
+              "api-reference/models",
+              "api-reference/training",
+              "api-reference/metrics",
+              "api-reference/cluster"
+            ]
+          }
+        ]
+      }
+    ]
+  },
   "footerSocials": {
     "github": "https://github.com/getainode",
     "website": "https://ainode.dev"
