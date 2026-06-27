@@ -66,7 +66,10 @@
               "guides/chat",
               "guides/models",
               "guides/training",
+              "guides/quantize",
               "guides/distributed",
+              "guides/federation",
+              "guides/secrets",
               "guides/update"
             ]
           },

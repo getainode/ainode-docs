@@ -35,8 +35,17 @@ curl -fsSL https://ainode.dev/install | bash
   <Card title="Fine-tuning" icon="brain" href="/guides/training">
     LoRA, QLoRA, and full fine-tune from the browser. No notebooks.
   </Card>
+  <Card title="Quantization" icon="compress" href="/guides/quantize">
+    Compress any model to AWQ or NVFP4 on your own GPU, then serve it or push it to Hugging Face.
+  </Card>
   <Card title="Multi-node clustering" icon="server" href="/guides/distributed">
     Automatic peer discovery. One model sharded across all GPUs in the cluster.
+  </Card>
+  <Card title="Federated serving" icon="network-wired" href="/guides/federation">
+    One endpoint, many models — the master routes each request to the node that holds the model.
+  </Card>
+  <Card title="Model stacking" icon="layer-group" href="/guides/federation">
+    Run several models per node. They persist across restarts and replay on boot.
   </Card>
   <Card title="Prometheus metrics" icon="chart-line" href="/api-reference/metrics">
     `/metrics` endpoint for Grafana, Prometheus, VictoriaMetrics.
@@ -147,9 +156,10 @@ AINode ships as a single unified container image. Every node in the cluster runs
 ghcr.io/getainode/ainode:latest   ← pulled by the installer
          │
          ├── aiohttp web server (chat UI + API proxy, port 3000 / 8000)
-         ├── vLLM inference engine (launched as subprocess)
+         ├── federated master router (routes /v1/* by model name)
+         ├── vLLM inference engine (one or more instances per node)
          ├── UDP discovery broadcaster (port 5679)
-         └── training pipeline (LoRA / QLoRA / Full)
+         └── training pipeline (LoRA / QLoRA / Full + quantization: AWQ / NVFP4)
 ```
 
 No host Python venv. No source builds. Upgrade is `ainode update`.

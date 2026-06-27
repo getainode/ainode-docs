@@ -1,0 +1,45 @@
+---
+title: "Federated Serving"
+description: "One master routes requests to whichever node holds each model — load and unload any model on any node from the browser."
+icon: "network-wired"
+---
+
+A cluster doesn't have to shard one giant model across every node. With
+**federation**, each node can serve its own model(s), and the **master** routes
+each `/v1/*` request to the node that holds the requested model — a single
+OpenAI-compatible endpoint in front of the whole fleet.
+
+## How routing works
+
+- The master inspects the `model` field of each `/v1/*` request and forwards it to
+  the node currently serving that model.
+- You manage the whole fleet from one browser tab: see every node, what each is
+  serving, and **load or unload a model on any node** without SSHing in.
+- If a target node is mid-swap or unreachable, the master applies **routing
+  failover** rather than hanging the request.
+
+<Note>
+Federation (one endpoint, many models, routed by name) is distinct from
+**distributed tensor-parallel** (one model sharded across nodes — see
+[Distributed Inference](/guides/distributed)). Use federation to serve many
+models across a fleet; use TP to serve one model too big for a single node.
+</Note>
+
+## Model stacking
+
+A single node can hold **more than one model at a time**. Stacked instances each
+get their own port, and they **persist across restarts** — AINode replays them on
+boot so your fleet comes back exactly as you left it. Loads are serialized so two
+models never try to claim the same memory at once.
+
+<Tip>
+When you ask the master for a model by name, point your OpenAI client at the
+master's `/v1` endpoint and set `model` to the exact id you loaded. A specific
+stacked instance is also reachable directly on its own port.
+</Tip>
+
+## Per-node memory headroom
+
+Each node exposes a **memory-utilization** knob so you can leave room for a second
+stacked model or for a quantization job (which needs the full unified memory — see
+[Quantize a Model](/guides/quantize)).

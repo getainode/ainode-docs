@@ -1,0 +1,84 @@
+---
+title: "Quantize a Model"
+description: "Compress any model to AWQ or NVFP4 in the browser, then serve it or push it to Hugging Face."
+icon: "compress"
+---
+
+AINode quantizes models **on your own GPU** — no external service, no notebook.
+A quant job runs llm-compressor one-shot PTQ inside a GPU container and writes a
+compressed-tensors checkpoint that vLLM serves natively.
+
+## Run a quantization
+
+Open **Training → Quantize a Model**.
+
+<Steps>
+  <Step title="Base model">
+    A Hugging Face repo id (`Qwen/Qwen3.5-4B`) or a model already in **Installed**.
+    An on-disk copy is used automatically when present (offline + reproducible).
+  </Step>
+  <Step title="Scheme">
+    - **AWQ** — W4A16, 4-bit weights. Serves as `awq_marlin` on GB10. **Proven.**
+    - **NVFP4** — Blackwell-native 4-bit float. Newer; verified on dense text models.
+  </Step>
+  <Step title="Calibration samples">
+    Default **256**, drawn from `HuggingFaceH4/ultrachat_200k`. More samples =
+    better calibration, longer job.
+  </Step>
+  <Step title="Push to Hugging Face (optional)">
+    Tick **Push result to Hugging Face** and (optionally) name the repo. Requires
+    a **write** token — see [Secrets](/guides/secrets). The push happens after the
+    job finishes and creates a **private** repo under your token's namespace.
+  </Step>
+</Steps>
+
+<Warning>
+The target node must be **idle**. Quantization needs the full unified memory, so
+AINode refuses to start a quant job while a model is loaded — **unload all models
+on the node first** (or resubmit with `force: true`). You'll get a `409` otherwise.
+</Warning>
+
+When the job finishes, the result appears in **Installed** as
+`<org--name>-<scheme>` (e.g. `Qwen--Qwen3.5-4B-awq`), ready to launch.
+
+## Multimodal & hybrid models (Qwen3.5)
+
+Qwen3.5 models bundle a vision tower and use Gated-DeltaNet linear attention.
+AINode handles this automatically: it loads the full model class so the saved
+config is complete (vLLM-servable), keeps the vision tower, embeddings, `lm_head`
+and the `linear_attn` projections in bf16, and saves the image processor.
+
+<Note>
+**AWQ on Qwen3.5 is verified servable. NVFP4 on Qwen3.5 is experimental and not
+yet validated** — prefer AWQ for the Qwen3.5 family today.
+</Note>
+
+## API
+
+```bash
+# Start a quant job (idle node required)
+curl -X POST http://localhost:3000/api/training/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "method": "quantize",
+        "base_model": "Qwen/Qwen3.5-4B",
+        "scheme": "awq",
+        "calib_samples": 256,
+        "push_to_hf": false
+      }'
+
+# Poll status / progress
+curl http://localhost:3000/api/training/jobs/{job_id}
+
+# When done, the quantized model is listed in the catalog
+curl http://localhost:3000/api/models | grep awq
+```
+
+To push to the Hub, add `"push_to_hf": true` (and optionally `"hf_repo": "name"`).
+The job validates write scope **before** running, so a read-only token fails fast.
+
+## Why 4-bit on GB10
+
+GB10 decode is memory-bandwidth bound. 4-bit weights mean fewer bytes read per
+token, so a quantized model both **fits more easily** and **decodes faster**.
+AWQ (`awq_marlin`) is the proven kernel path on GB10's sm120.

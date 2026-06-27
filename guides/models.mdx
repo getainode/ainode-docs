@@ -1,42 +1,72 @@
 ---
 title: "Models"
-description: "Download, manage, and launch models from the browser."
+description: "Download, manage, launch, and unload models from the browser."
 icon: "cube"
 ---
 
+The **Models** page is split into two lists:
+
+- **Installed** — models already on disk, ready to launch. Shows quantization,
+  size, and architecture per model.
+- **Browse** — the live catalog: curated picks plus live Hugging Face search.
+
 ## Downloading models
 
-Open the **Downloads** tab. Three ways to add a model:
+In **Browse**, add a model three ways:
 
-1. **Catalog** — 50+ curated models, click to download
-2. **Search** — search Hugging Face live
-3. **Custom** — paste any HF repo ID (e.g. `microsoft/Phi-4`)
+1. **Catalog** — curated models (including frontier MoE and NVFP4/AWQ picks for
+   GB10 clusters), click to download.
+2. **Search** — search Hugging Face live; results show **FITS GPU** / availability
+   badges computed from your cluster's aggregate VRAM.
+3. **Custom** — paste any HF repo id (e.g. `microsoft/Phi-4`).
 
 Downloads run in the background with a progress bar. Click **✕** to cancel.
+Already-downloaded models show as **Installed** instead of offering a re-download.
 
 ## Launching a model
 
-Once downloaded, click the model card → **▶ Launch Model**. AINode saves the model to config and restarts the engine.
+In **Installed**, click a model → **▶ Launch**. On a single node AINode serves it
+directly; on a cluster you can pick which nodes span it (see
+[Distributed Inference](/guides/distributed)) or serve different models on
+different nodes (see [Federated Serving](/guides/federation)).
+
+## Unloading a model
+
+Each running instance has an **Unload** control that stops just that instance and
+frees its memory. (Unload force-clears a dead or phantom instance too, so a node
+that stopped responding doesn't stay stuck "loaded".) Unload a node's models
+before starting a [quantization job](/guides/quantize) — quantization needs the
+full unified memory.
+
+## Serving from on-disk weights
+
+AINode serves directly from the weights in `~/.ainode/models/<slug>`. A model you
+downloaded once — or produced with a [quantization](/guides/quantize) or
+[fine-tuning](/guides/training) job — is immediately launchable; no re-download.
 
 ## Gated models
 
-Llama, Gemma, and other gated repos require a Hugging Face token:
+Llama, Gemma, and other gated repos require a Hugging Face **read** token:
 
 ```bash
 ainode config --hf-token hf_xxxxxxxxxxxxxxxx
 ```
 
+See [Tokens & Secrets](/guides/secrets) for read vs write tokens.
+
 ## Supported models
 
-Any model compatible with vLLM works. Tested models include:
+Any model compatible with vLLM works. Tested families include:
 
 - Meta Llama 3 / 3.1 (8B, 70B, 405B)
-- Qwen 2.5 (0.5B → 72B)
+- Qwen 2.5 and Qwen3 / Qwen3.5 (incl. frontier MoE, e.g. Qwen3-235B-A22B)
 - Mistral / Mixtral
 - Google Gemma 2
 - DeepSeek V3
 - Phi-3 / Phi-4
 - Command R+
+
+AWQ (`awq_marlin`) and NVFP4 quantized checkpoints serve natively on GB10.
 
 ## Shared storage across cluster
 
