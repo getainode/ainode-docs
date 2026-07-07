@@ -1,0 +1,119 @@
+---
+title: "Quantize a Model"
+description: "Compress any model to AWQ or NVFP4 on your own GPU, then serve it or push it to Hugging Face."
+icon: "compress"
+---
+
+AINode quantizes models **on your own GPU** — no external service, no notebook. A
+quant job runs `llm-compressor` one-shot PTQ inside a **spawned GPU container** and
+writes a compressed-tensors checkpoint that vLLM serves natively.
+
+<Note>
+The shipped orchestrator image is intentionally slim (no `torch`), so — exactly
+like training — a quant job runs in a GPU container spawned from the quant image
+(`--gpus all`, single-node, single-GPU). Your model store is mounted **read-write**
+so the runner reads the base weights and writes the output back into
+`~/.ainode/models/`. Cancelling the job tears down the container.
+</Note>
+
+## Run a quantization
+
+Open **Training → Quantize a Model**.
+
+<Steps>
+  <Step title="Base model">
+    A Hugging Face repo id (`Qwen/Qwen3.5-4B`) or a model already in **Installed**.
+    An on-disk copy is used automatically when present (offline + reproducible).
+  </Step>
+  <Step title="Scheme">
+    - **AWQ** — W4A16, 4-bit weights (asymmetric, via `AWQModifier`). Serves as
+      `awq_marlin` on GB10. **Proven.**
+    - **NVFP4** — Blackwell-native 4-bit float (via `QuantizationModifier`). Serves
+      through a MARLIN engine env that AINode applies automatically; verified on
+      dense text models.
+  </Step>
+  <Step title="Calibration samples">
+    Default **256**, drawn from `HuggingFaceH4/ultrachat_200k`. More samples =
+    better calibration, longer job.
+  </Step>
+  <Step title="Push to Hugging Face (optional)">
+    Tick **Push result to Hugging Face** and (optionally) name the repo. Requires a
+    **write** token — see [Tokens & Secrets](/guides/secrets). Write scope is
+    validated **before** the job runs, so a read-only token fails fast (`400`)
+    instead of after a multi-GB compute. The push happens after the job finishes and
+    creates a **private** repo under your token's namespace.
+  </Step>
+</Steps>
+
+<Warning>
+The target node must be **idle**. Quantization needs the node's full unified memory,
+so AINode refuses to start a quant job while a model is loaded on that node — **unload
+all models on the node first** (or resubmit with `force: true`). You'll get a `409`
+otherwise.
+</Warning>
+
+When the job finishes, the result appears in **Installed** as `<org--name>-<scheme>`
+(e.g. `Qwen--Qwen3.5-4B-awq`), ready to launch.
+
+## Multimodal & hybrid models (Qwen3.5)
+
+Qwen3.5 models bundle a vision tower and use Gated-DeltaNet linear attention. AINode
+handles this automatically: it loads the full model class so the saved config is
+complete (vLLM-servable), keeps the vision tower, embeddings, `lm_head` and the
+`linear_attn` projections in bf16, and saves the image processor.
+
+<Note>
+**AWQ on Qwen3.5 is verified servable. NVFP4 on Qwen3.5 is experimental and not yet
+validated** — prefer AWQ for the Qwen3.5 family today. (NVFP4 is proven on dense
+text models such as the Llama-3.1-8B-NVFP4 and Nemotron-Cascade NVFP4 catalog
+entries.)
+</Note>
+
+## Serving a quantized model
+
+You don't hand-edit quantization flags. AINode reads the on-disk `config.json` and
+picks the right kernel path automatically:
+
+- **AWQ** serves as `awq_marlin` on GB10 (sm120) — the proven kernel path.
+- **NVFP4** serves via a MARLIN engine env applied automatically when the config
+  reports NVFP4 quantization.
+
+A per-load `quantization` override is honored if you ever need to force it. See
+[Troubleshooting → Quantized models on GB10](/troubleshooting).
+
+## API
+
+```bash
+# Start a quant job (idle node required)
+curl -X POST http://localhost:3000/api/training/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "method": "quantize",
+        "base_model": "Qwen/Qwen3.5-4B",
+        "scheme": "awq",
+        "calib_samples": 256,
+        "push_to_hf": false
+      }'
+
+# Poll status / progress
+curl http://localhost:3000/api/training/jobs/{job_id}
+
+# When done, the quantized model is listed in the catalog
+curl http://localhost:3000/api/models | grep awq
+```
+
+To push to the Hub, add `"push_to_hf": true` (and optionally `"hf_repo": "name"`).
+Write scope is asserted before the job starts, so a read-only token is rejected up
+front. To override the idle-node guard, add `"force": true`.
+
+## Why 4-bit on GB10
+
+GB10 decode is memory-bandwidth bound. 4-bit weights mean fewer bytes read per
+token, so a quantized model both **fits more easily** and **decodes faster**. AWQ
+(`awq_marlin`) is the proven kernel path on GB10's sm120; NVFP4 is Blackwell-native
+and serves via the MARLIN env.
+
+<Info>
+Containerized quantization landed in 0.5.0 and is current as of **0.5.2**. Run
+`ainode update` if **Training → Quantize a Model** isn't in your dashboard.
+</Info>
