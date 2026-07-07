@@ -67,8 +67,10 @@
               "guides/models",
               "guides/training",
               "guides/autodata",
+              "guides/quantize",
               "guides/vision-models",
               "guides/distributed",
+              "guides/federation",
               "guides/update"
             ]
           },
@@ -77,6 +79,7 @@
             "pages": [
               "ops/role",
               "ops/networking",
+              "guides/secrets",
               "ops/release-flow"
             ]
           }
