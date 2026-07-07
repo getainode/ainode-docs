@@ -10,24 +10,6 @@ icon: "wrench"
 
 Check `ainode logs -f` for the specific error.
 
-### AWQ model crash on GB10 (sm_12.1)
-
-```
-RuntimeError: Engine core initialization failed.
-quantization=awq_marlin
-```
-
-**Cause:** vLLM auto-upgrades AWQ models to `awq_marlin`. The Marlin CUDA kernels aren't compiled for GB10 (sm_12.1) in the current base image.
-
-**Fix (v0.4.4+):** AINode now pins `--quantization awq` automatically for AWQ model names. Run `ainode update` to get the fix.
-
-**Fix (immediate):** Switch to the non-AWQ variant:
-
-```bash
-ainode config --model Qwen/Qwen2.5-7B-Instruct   # no AWQ suffix
-sudo systemctl restart ainode
-```
-
 ### Gated model 401 error
 
 ```
@@ -45,11 +27,57 @@ sudo systemctl restart ainode
 
 **Fix:** Reduce `batch_size`, enable gradient checkpointing, or switch to a smaller model / QLoRA.
 
+### Quantized models on GB10 (AWQ / NVFP4)
+
+AWQ **does** serve on GB10 (sm_121) — vLLM runs it as `awq_marlin` (e.g. ~19 t/s on a 9B, ~27 t/s on an A3B MoE). NVFP4 also serves, via a MARLIN engine env applied automatically when the on-disk `config.json` reports NVFP4 quantization. You do not need to hand-edit quantization flags; a per-load `quantization` override is honored when set.
+
+## Stacked loads (2nd+ model on a node)
+
+Each node can serve **multiple models at once** (model stacking). Stacked instances each get their own port (8001, 8002, …) and their own `served_model_name` alias(es); the master router routes `/v1/*` by requested model name to the instance serving it, so two loads no longer collide on the primary `:8000` slot or the same served name. Per-load `served_model_name` aliases persist across restarts.
+
+### Stacked load rejected: HTTP 400
+
+```
+A stacked load (2nd+ model on this node) must specify gpu_memory_utilization explicitly
+```
+
+**Cause:** A 2nd+ model on a node needs an explicit memory reservation — the node default could push total reservation past capacity and hard-crash the GB10 (unified memory → host death).
+
+**Fix:** Include `gpu_memory_utilization` (e.g. `0.4`) in the load request.
+
+### Stacked load rejected: HTTP 409
+
+```
+Refusing stacked load: ... would total X (> 0.90 cap). Unload a model or lower gpu_memory_utilization.
+```
+
+**Cause:** The node's projected total GPU-memory reservation would exceed the 0.90 cap.
+
+**Fix:** Unload a model or lower `gpu_memory_utilization`. The guard runs **before** the live instance is touched, so a rejected load leaves the running model intact.
+
+## VLM / vision model outputs garbage
+
+**Cause:** fp8 KV cache corrupts vision-model generation on GB10 (verified: Qwen2.5-VL emits garbage on fp8, clean on `auto`; text models are unaffected).
+
+**Fix:** Serve the VLM with `kv_cache_dtype=auto`. AINode auto-downgrades the fp8 KV default to `auto` for multimodal models (detected from `config.json` `vision_config` or a `*VL*`/`Vision` architecture). Opt back in with an explicit per-load `kv_cache_dtype=fp8` only if you know the model/vLLM combo handles it.
+
+<Note>
+Detection reads the **local** `config.json`, so a VLM served straight from a
+repo-id whose weights aren't on disk yet isn't detected until download finishes.
+Fixed in 0.5.1 — run `ainode update`.
+</Note>
+
+## Per-load overrides lost after restart
+
+**Symptom (pre-0.5.1):** a VLM loaded with `kv_cache_dtype=auto` came back on fp8 after a restart (corrupted output).
+
+**Fix:** All override fields — `served_model_name`, `max_model_len`, `kv_cache_dtype`, `quantization`, `trust_remote_code` — now persist and replay correctly across restarts with no cross-model inheritance. Run `ainode update`.
+
 ## Model downloaded but not showing in chat
 
 The chat selector only shows models currently **loaded** in vLLM. A downloaded model that isn't running won't appear.
 
-**Fix:** Go to Downloads → find the model → click **▶ Launch Model**.
+**Fix:** In the Server view, find the model → click **Load**. (In 0.5.1 the Load button was wired to actually load — it previously showed a "coming soon" toast. The instance stop control is labeled **Unload**, renamed from DELETE in 0.4.38.)
 
 ## Workers not appearing in topology
 
@@ -66,7 +94,7 @@ If `⬆ Update all` shows a node as failed:
 ainode update
 ```
 
-Common causes: SSH key not set up, node unreachable, disk full.
+`ainode update` (and the dashboard's **Update all** → `POST /api/cluster/update-all`) genuinely pull the newest pinned image and swap it via `~/.ainode/image.env`, then restart. Common failure causes: SSH key not set up, node unreachable, disk full.
 
 ## Ray placement group hangs (distributed inference)
 

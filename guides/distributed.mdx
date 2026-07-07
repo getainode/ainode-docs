@@ -1,30 +1,79 @@
 ---
 title: "Distributed Inference"
-description: "Shard one large model across multiple GB10 nodes."
+description: "Pool multiple GB10 nodes to serve frontier MoE models that don't fit on one node."
 icon: "network-wired"
 ---
 
+## When the cluster helps (and when it doesn't)
+
+GB10 decode is **memory-bandwidth bound** (273 GB/s per node), not compute bound.
+That shapes what distribution buys you:
+
+- **Frontier MoE that can't fit one node** — the design point. A
+  Mixture-of-Experts model (e.g. **Qwen3.5-397B-A17B**) needs the cluster's pooled
+  memory for its *total* params but only reads its *active* params per token, so
+  single-stream decode stays fast (**~16–17 t/s** observed at TP=4 on a 4-node
+  cluster). MoE decouples capacity from decode cost — the right match for this
+  hardware.
+- **Batched multi-user throughput** and **fine-tuning / training** — also pay off.
+
+<Warning>
+Multi-node tensor parallelism does **not** improve single-stream latency for
+**dense** models. It adds 2 all-reduces per layer over the fabric, and the comms
+tax eats the per-node bandwidth gain. A dense model that fits on one node should
+run **TP=1** — distributing it is slower, not faster. A dense 70B (NVFP4 ~35 GB)
+caps near ~7–8 t/s single-stream on **one** node; dense 405B is ~1 t/s. Reach for
+the cluster to gain *capacity*, not single-stream *latency*.
+</Warning>
+
 ## How it works
 
-AINode uses Ray for cross-node orchestration and NCCL for GPU-to-GPU tensor communication. The head node:
+AINode uses Ray for cross-node orchestration and NCCL for GPU-to-GPU tensor
+communication, driving eugr's `launch-cluster.sh`. A distributed load is a
+`POST /api/cluster/load` with a `strategy` of `auto`, `tensor_parallel`, or
+`pipeline_parallel` (config `distributed_mode` is `solo` | `head` | `member`). The
+head node:
 
 1. Discovers workers via UDP broadcast
-2. SSHes into each peer and starts a vLLM worker container
+2. Starts a vLLM worker container on each peer
 3. Forms a Ray cluster
 4. Launches vLLM with `--tensor-parallel-size N`
 
-Each GPU holds `1/N` of the model weights. All-reduce collectives run over NCCL, preferring RoCE (RDMA) at 200 Gbps when ConnectX-7 hardware is present.
+Each GPU holds `1/N` of the model weights (or its share of experts). All-reduce
+collectives run over NCCL.
 
-## Verified configurations
+### Flags the engine emits automatically
 
-| Config | Total VRAM | Models |
-|---|---|---|
-| 2× DGX Spark (TP=2) | 244 GB | Llama 3.1 70B fp16 |
-| 4× DGX Spark + ASUS (TP=4) | 487 GB | Llama 3.1 405B AWQ |
+You never hand-edit vLLM commands. For frontier MoE on this hardware AINode emits:
+
+- `--tensor-parallel-size N`
+- `--kv-cache-dtype fp8` (required for long context)
+- `--enforce-eager` (Blackwell/ARM stability)
+- `--gpu-memory-utilization 0.85`
+- RoCE/RDMA NCCL environment per node
+
+RoCE (RDMA) is **auto-detected** and preferred when ConnectX-7 hardware is present
+(up to ~200 Gbps); it is not required — nodes fall back to available transports and
+may run inbox or patched NCCL depending on driver state.
+
+## Launch from the browser
+
+The launch form's **node picker** and **strategy pill** drive distributed loads.
+Before launch, the GUI shows a **sharding-plan preview** — `world_size`, TP / PP
+degree, and total memory required — so you can confirm the model fits the selected
+nodes. Node-targeted and GMU-guarded loads apply here too: distributed loads route
+through `POST /api/cluster/load` with the chosen `{node_id}`.
+
+## Reference configuration (MoE)
+
+| Config | Total pooled memory | Model | Notes |
+|---|---|---|---|
+| 4× DGX Spark (TP=4) | ~487 GB | Qwen3.5-397B-A17B (MoE) | fp8 KV, `--enforce-eager`; ~16–17 t/s single-stream |
 
 ## Critical: single NIC per cluster subnet
 
-Each node must have exactly **one NIC with an IP on the cluster subnet**. Multiple NICs on the same subnet cause Ray placement group hangs with no error message.
+Each node must have exactly **one NIC with an IP on the cluster subnet**. Multiple
+NICs on the same subnet cause Ray placement group hangs with no error message.
 
 ```bash
 # Verify — should show exactly one IP on your cluster subnet
@@ -33,15 +82,19 @@ ip addr | grep "10.0.0\|192.168.0"
 
 ## NCCL transport verification
 
-After launching a distributed job, check vLLM worker logs:
+After launching a distributed job, check vLLM worker logs. The exact log strings
+depend on the transport NCCL selects on your fabric — verify against your own
+launch rather than trusting these literally:
 
 ```bash
 ainode logs -f | grep "Using network"
-# Expected: "Using network IB" + "mlx5_0:1/RoCE ... speed=200000"
-# Bad: "Using network Socket"  ← 10x slower, check ConnectX-7 cabling
+# Good:  a RoCE/IB transport line naming your NIC + link speed
+# Bad:   "Using network Socket"  ← much slower, check ConnectX-7 cabling
 ```
 
-## GPU Direct RDMA (optional speedup)
+## GPU Direct RDMA (optional, advanced)
+
+Optional speedup, and dependent on the host driver state on your fleet:
 
 ```bash
 # Load peermem module on each host (not in container)

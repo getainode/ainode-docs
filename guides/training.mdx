@@ -12,28 +12,60 @@ icon: "brain"
 | **QLoRA** | Lowest — 4-bit NF4 base + adapters | Large models on memory-constrained nodes |
 | **Full** | High — all weights updated | Best quality, 128+ GB VRAM |
 
+## How training runs
+
+On the shipped image, the orchestrator container is intentionally **slim** — it
+carries no `torch` / `peft` / `datasets`. So when you submit a LoRA, QLoRA, or full
+job (and adapter **merge**), AINode **spawns a GPU container** (quant-image based)
+to run it: your model store is mounted read-write, datasets read-only, the runner
+and container config are staged into the job dir, and `peft` is pip-shimmed at
+launch. Cancelling a job tears down the actual container.
+
+<Note>
+Distributed **(DDP)** training runs in host mode, not a spawned container.
+</Note>
+
 ## Workflow
 
-### 1. Upload a dataset
+### 1. Add a dataset
 
-Supported formats: JSONL, JSON, CSV. Field schemas auto-detected:
+AINode has a **Dataset Manager** (the **Datasets** tab in the Training view). You
+can:
 
-```jsonl
-{"text": "full training text"}
-{"instruction": "...", "output": "..."}
-{"prompt": "...", "completion": "..."}
-```
+- **Upload** local files — JSONL, JSON, or CSV (`POST /api/datasets/upload`).
+  Field schemas are auto-detected:
 
-Or reference a Hugging Face dataset by ID (`tatsu-lab/alpaca`).
+  ```jsonl
+  {"text": "full training text"}
+  {"instruction": "...", "output": "..."}
+  {"prompt": "...", "completion": "..."}
+  ```
+
+- **Preview** samples before training (`GET /api/datasets/{id}/preview`)
+- **Reference** any dataset in a run by its `dataset_id`
+- **Delete** datasets you no longer need (`DELETE /api/datasets/{id}`)
+
+You can also reference a Hugging Face dataset by ID (`tatsu-lab/alpaca`).
+
+<Note>
+Datasets produced by **AutoData** register automatically with the Dataset Manager,
+so the returned `dataset_id` drops straight into a training run.
+</Note>
 
 ### 2. Launch the wizard
 
 **Training** tab → **New Training Run** → 5-step wizard:
 Model → Dataset → Method → Distribution → Review
 
+The wizard submits **canonical Hugging Face repo ids** (`org/name`). When you train
+an on-disk model, the container builder maps its on-disk reference (an `org--name`
+slug) to the right mount for you — you no longer have to worry that a disk slug
+gets rejected by Hugging Face.
+
 ### 3. Monitor progress
 
-Live loss chart, progress bar, log tail. Cancel anytime — saves the last checkpoint.
+Live loss chart, progress bar, log tail. Cancel anytime — saves the last
+checkpoint and tears down the training container.
 
 ### 4. Retrieve artifacts
 
@@ -44,11 +76,14 @@ Live loss chart, progress bar, log tail. Cancel anytime — saves the last check
 
 ### 5. Merge LoRA (optional)
 
-Click **Merge Adapter** to merge LoRA weights into the base model via `PEFT.merge_and_unload()`. The merged model can be loaded directly into vLLM.
+Click **Merge Adapter** to merge LoRA weights into the base model via
+`PEFT.merge_and_unload()`. The merged model can be loaded directly into vLLM. (This
+action is state-gated and runs in the spawned GPU container.)
 
 ### 6. Resume from checkpoint
 
-If a run fails or is cancelled, click **Resume** — AINode finds the latest checkpoint and continues.
+If a run fails or is cancelled, click **Resume** — AINode finds the latest
+checkpoint and continues.
 
 ## Configuration
 
@@ -60,26 +95,28 @@ If a run fails or is cancelled, click **Resume** — AINode finds the latest che
 | `lora_rank` | 16 | Higher = more capacity, more VRAM |
 | `max_seq_length` | 2048 | |
 | `eval_split` | 0.1 | 0 to disable evaluation |
-| `wandb_project` | — | Enable W&B logging |
 | `use_gradient_checkpointing` | false | Saves VRAM at cost of speed |
+| `wandb_project` | — | Enable W&B logging |
 
-Click **★ Smart Defaults** in the wizard to auto-fill based on your model and method.
+Click **★ Smart Defaults** in the wizard to auto-fill based on your model and
+method.
 
 ## Gated models (Llama, Gemma)
 
 ```bash
 ainode config --hf-token hf_xxxxxxxxxxxxxxxx
-sudo systemctl restart ainode
 ```
 
-The token propagates automatically to all training jobs.
+No restart is needed for training — the submit handler reads `hf_token` live from
+the node config at job-submit time and propagates it automatically to every
+training job. (A restart is only relevant for engine/serving, not training.)
 
 ## API
 
 ```bash
 # Submit
 curl -X POST http://localhost:3000/api/training/jobs \
-  -d '{"base_model": "Qwen/Qwen2.5-7B-Instruct", "dataset_path": "data.jsonl", "method": "lora"}'
+  -d '{"base_model": "Qwen/Qwen2.5-7B-Instruct", "dataset_id": "<id>", "method": "lora"}'
 
 # Status
 curl http://localhost:3000/api/training/jobs/{job_id}
@@ -99,8 +136,10 @@ curl -X POST http://localhost:3000/api/training/jobs/{job_id}/resume
 
 ## Troubleshooting
 
-**CUDA out of memory** — Lower `batch_size` to 1–2, enable `use_gradient_checkpointing`, or switch to QLoRA.
+**CUDA out of memory** — Lower `batch_size` to 1–2, enable
+`use_gradient_checkpointing`, or switch to QLoRA.
 
-**DDP hangs** — Ensure `MASTER_ADDR` is set and reachable on the cluster fabric. Don't use Tailscale IPs for NCCL.
+**DDP hangs** — Ensure `MASTER_ADDR` is set and reachable on the cluster fabric.
+Don't use Tailscale IPs for NCCL.
 
 **401 from Hugging Face** — Run `ainode config --hf-token hf_xxx`.

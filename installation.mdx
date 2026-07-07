@@ -3,6 +3,26 @@ title: "Installation"
 description: "Install AINode on a single node or a multi-node cluster."
 ---
 
+## Before you install
+
+The installer enforces one hard prerequisite:
+
+- **`/mnt/shared-models` must exist**, or the installer aborts. Create it first (for a cluster, mount shared model storage there — NFS from the master is recommended):
+  ```bash
+  sudo mkdir -p /mnt/shared-models
+  ```
+
+<Note>
+**NGC login is optional — only for the opt-in NVIDIA engine backend.** AINode's
+default engine is the eugr/spark-vllm-docker build (`ghcr.io/getainode/ainode-base`),
+which needs no NGC credentials. If you plan to switch to the NVIDIA vLLM backend
+(`engine_backend: "nvidia"`, v0.5.0+), the installer can pre-pull
+`nvcr.io/nvidia/vllm:26.02-py3` — provide NGC credentials via `docker login nvcr.io`
+(username `$oauthtoken`, password = your NGC API key), `NGC_API_KEY`, or
+`/etc/ainode/ngc.token`. Without them the pre-pull is skipped, install continues,
+and the default engine is unaffected.
+</Note>
+
 ## Single node
 
 ```bash
@@ -29,6 +49,8 @@ Worker nodes start instantly with no model — they announce themselves to the m
 | `--job worker` | Worker node | No model, no engine — waits for the master |
 | _(none)_ | Solo | Standalone, no clustering |
 
+Under the hood these map to the node's `distributed_mode` config field: master → `head`, worker → `member`, solo → `solo`.
+
 Change role after install:
 
 ```bash
@@ -39,18 +61,30 @@ sudo systemctl restart ainode
 ## Uninstall
 
 ```bash
-curl -fsSL https://ainode.dev/uninstall | bash          # keeps ~/.ainode data
-curl -fsSL https://ainode.dev/uninstall | bash --purge  # deletes everything
+curl -fsSL https://ainode.dev/uninstall | bash               # keeps ~/.ainode data
+curl -fsSL https://ainode.dev/uninstall | bash -s -- --purge  # deletes everything
 ```
+
+<Warning>
+Use `bash -s -- --purge`, not `bash --purge`. With `bash --purge` the flag is
+consumed by `bash` itself (not the piped script), so it is silently ignored and
+your data is **not** purged.
+</Warning>
 
 ## Container images
 
 Both registries serve identical images. GHCR is canonical (what the installer uses).
 
 ```bash
-docker pull ghcr.io/getainode/ainode:latest    # canonical
-docker pull argentaios/ainode:latest            # Docker Hub mirror
+docker pull ghcr.io/getainode/ainode:0.5.2      # canonical (pin a numeric tag)
+docker pull argentaios/ainode:latest            # Docker Hub mirror (may lag GHCR)
 ```
+
+<Tip>
+The installer deliberately resolves and pins the highest numeric tag rather than
+`:latest`, because `:latest` has drifted to ancient builds in the past. If you
+pull manually, pin a numeric tag too.
+</Tip>
 
 ## What gets installed
 
@@ -59,6 +93,8 @@ docker pull argentaios/ainode:latest            # Docker Hub mirror
 | `/etc/systemd/system/ainode.service` | Systemd unit — auto-starts on boot |
 | `/usr/local/bin/ainode` | Host wrapper CLI |
 | `~/.ainode/config.json` | Node configuration |
+| `~/.ainode/image.env` | Pinned container image tag (`EnvironmentFile` the unit reads; swapped by `ainode update`) |
 | `~/.ainode/models/` | Downloaded model weights |
+| `~/.ainode/datasets/` | Training / AutoData datasets |
 | `~/.ainode/logs/` | Engine logs |
 | `~/.ainode/training/` | Fine-tune artifacts |

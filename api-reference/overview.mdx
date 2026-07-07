@@ -1,15 +1,28 @@
 ---
 title: "API Overview"
-description: "AINode exposes an OpenAI-compatible API on port 8000 and a management API on port 3000."
+description: "AINode exposes an OpenAI-compatible API and a management API on port 3000, plus the raw single-node vLLM on port 8000."
 ---
 
 ## Base URLs
 
+Port **3000** is the AINode aiohttp app: the management API, the Prometheus
+exposition, and an OpenAI-compatible proxy that federates across the whole
+cluster. Port **8000** is the raw single-node vLLM container.
+
 | Purpose | URL |
 |---|---|
-| Inference (OpenAI-compatible) | `http://localhost:8000/v1` |
+| Inference (OpenAI-compatible, cluster-federated) | `http://localhost:3000/v1` |
+| Inference (raw single-node vLLM) | `http://localhost:8000/v1` |
 | Management API | `http://localhost:3000/api` |
-| Prometheus metrics | `http://localhost:8000/metrics` |
+| Prometheus metrics (`ainode_*`) | `http://localhost:3000/metrics` |
+
+<Note>
+On a multi-node deployment, always target port **3000** for inference. The
+proxy routes each request to whichever node serves the requested model and
+fails over if a node drops. Port `8000/v1` only ever sees the one node's local
+vLLM. Likewise `http://localhost:8000/metrics` emits vLLM's own `vllm:*`
+metrics, not the documented `ainode_*` set — those are on `3000/metrics`.
+</Note>
 
 ## Authentication
 
@@ -24,22 +37,60 @@ Pass the key as `Authorization: Bearer <key>` on all `/v1/*` requests.
 
 ## OpenAI-compatible endpoints
 
+The AINode proxy on port **3000** serves the OpenAI surface with cross-node
+federation and failover. The raw single-node vLLM on port **8000** serves the
+same paths for just that node.
+
 | Endpoint | Method | Description |
 |---|---|---|
 | `/v1/chat/completions` | POST | Chat completions (streaming supported) |
 | `/v1/completions` | POST | Text completions |
-| `/v1/embeddings` | POST | Embeddings |
-| `/v1/models` | GET | List loaded models |
+| `/v1/embeddings` | POST | Embeddings (served in-process on `3000`) |
+| `/v1/models` | GET | On `3000`: the federated union of models across the fleet. On `8000`: only that node's local vLLM models. |
 
 ## Management endpoints
 
 | Endpoint | Description |
 |---|---|
 | `GET /api/status` | Node status, GPU info, engine state |
-| `GET /api/nodes` | All discovered cluster nodes |
-| `GET /api/cluster/resources` | Aggregated VRAM across cluster |
+| `GET /api/health` | Liveness check |
+| `GET /api/nodes` | All discovered cluster nodes (incl. per-node `instances[]`) |
+| `GET /api/cluster/info` | Cluster topology |
+| `GET /api/cluster/resources` | Aggregated VRAM + GPU counts across the cluster |
+| `POST /api/cluster/load` | Load a model on any node (`{node_id, model, ...}`) |
+| `POST /api/cluster/unload` | Unload a model on any node (`{node_id, model}`) |
+| `POST /api/cluster/update-all` | Cluster-wide pull + image swap (workers first, master last, over HTTP) |
+| `GET /api/cluster/update-status` | Live per-node update progress |
+| `POST /api/cluster/role` | Set this node's cluster/distributed role |
+| `POST /api/cluster/id` | Set this node's cluster id |
 | `GET /api/metrics` | JSON metrics snapshot |
-| `GET /metrics` | Prometheus text exposition |
-| `POST /api/engine/set-model` | Switch active model |
-| `POST /api/engine/update` | Trigger `docker pull + restart` |
-| `GET /api/version/check` | Check for newer version on GHCR |
+| `GET /metrics` | Prometheus text exposition (`ainode_*`) |
+| `POST /api/engine/set-model` | Switch active model (legacy single-model restart path) |
+| `POST /api/engine/update` | Pull a target image, pin it, and self-restart onto it |
+| `GET /api/version/check` | Check for a newer version on GHCR |
+| `GET /api/config` | Read node config |
+| `PATCH /api/config` | Update node config |
+
+<Note>
+The genuine deploy path is `POST /api/cluster/update-all` (or `ainode update
+[version]`). It pulls `ghcr.io/getainode/ainode:<version>` on every node over
+HTTP — workers first, master last, no SSH — and each node swaps to the new
+image via its swappable systemd unit.
+</Note>
+
+## `POST /api/engine/update`
+
+Pull a target image and swap this node to it.
+
+- Body (optional): `{"version": "0.5.2"}`. Omit it to resolve and pull the
+  highest numeric GHCR tag anonymously.
+- On a successful `docker pull`, AINode writes `~/.ainode/image.env` (read by
+  the swappable systemd unit via `EnvironmentFile`), then `docker stop`s
+  itself so `Restart=always` relaunches the container on the new image.
+- It only self-restarts when the container was launched by the swappable unit
+  (`AINODE_UNIT_SWAPPABLE=1`). On a node still running a pre-swappable unit it
+  pins the image and returns `{"status": "pulled", "restarted": false, ...}`
+  with a message telling the operator to migrate the unit (re-run the
+  installer).
+- A pull failure returns HTTP **502** and does **not** write `image.env` or
+  restart — the node keeps running its current image.

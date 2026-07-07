@@ -4,7 +4,8 @@ description: "Browser-based chat with any loaded model."
 icon: "message"
 ---
 
-The **Chat** tab gives you a streaming conversation interface with the currently loaded model.
+The **Chat** tab gives you a streaming conversation interface with any loaded
+model.
 
 ## Features
 
@@ -12,13 +13,23 @@ The **Chat** tab gives you a streaming conversation interface with the currently
 - Multi-turn conversations
 - System prompt editor
 - Code blocks with syntax highlighting
-- Image drag-and-drop
+- Image drag-and-drop (for vision models)
 - Stop generation mid-stream
 - TTFT and tokens/sec metrics
 
+<Note>
+Vision (VLM) models on GB10 auto-skip the fp8 KV cache (it corrupts multimodal
+generation). This happens automatically when you load a vision model — no action
+needed — so image responses stay clean.
+</Note>
+
 ## Switching models
 
-Use the model selector in the chat toolbar. Only models currently loaded in vLLM appear here. To load a different model, go to **Downloads** → find the model → **Launch Model**.
+Use the model selector in the chat toolbar. Every model currently loaded in vLLM
+appears here — including **stacked** models, so a primary on `:8000` and a stacked
+instance on `:8001+` show up side by side. A model loaded with a custom
+`served_model_name` alias appears under that alias. To load a different model, go
+to the **Models** page → find the model → **Launch Model**.
 
 ## API (OpenAI-compatible)
 
@@ -38,9 +49,7 @@ for chunk in client.chat.completions.create(
 
 Works with Open WebUI, LiteLLM, LangChain, and any other OpenAI-compatible client.
 
-## Embeddings
-
-```bash
-curl http://localhost:8000/v1/embeddings \
-  -d '{"model": "Qwen/Qwen2.5-7B-Instruct", "input": "Hello world"}'
-```
+<Note>
+`api_key="not-needed"` is fine for the default no-auth setup. If you've turned on
+API-key auth with `ainode auth enable`, pass your real key here instead.
+</Note>

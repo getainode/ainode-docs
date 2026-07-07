@@ -1,0 +1,106 @@
+---
+title: "Vision Models (VLMs)"
+description: "Serve multimodal models on GB10 — OCR and image understanding."
+icon: "image"
+---
+
+## The GB10 fp8 KV rule
+
+On GB10, an **fp8 KV cache corrupts vision-model generation** — verified: Qwen2.5-VL
+emits garbage on fp8 and clean output on `auto`. Text models are unaffected.
+
+AINode handles this for you. When it detects a multimodal model — its on-disk
+`config.json` has a `vision_config` key, or an `architectures` entry matches
+`/VL|Vision|vision/` — it **downgrades the fp8 default to `auto` automatically**
+(`nvidia.py` `_effective_kv_cache_dtype`). Per-load overrides also persist correctly
+across restarts, so a VLM loaded with `kv_cache_dtype: "auto"` comes back on `auto`
+after a `systemctl restart`, not on fp8.
+
+So a VLM served **through AINode's launch path** is safe by default — no action needed.
+
+<Warning>
+**Repo-id before download.** Auto-detect only reads the model's **local, on-disk**
+`config.json`. A VLM that hasn't been downloaded yet and is served by bare repo-id can't
+be inspected, so it keeps the fp8 default until its weights are on disk. **Download the
+model first**, or set `kv_cache_dtype: "auto"` explicitly on the load.
+</Warning>
+
+## Working load body
+
+`POST /api/models/load` — a Qwen2.5-VL example:
+
+```bash
+curl -X POST http://localhost:3000/api/models/load \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "kv_cache_dtype": "auto",
+    "trust_remote_code": true,
+    "gpu_memory_utilization": 0.4
+  }'
+```
+
+`gpu_memory_utilization` is **required** when stacking a second or later model on a node
+— stacked loads are admission-guarded and return **409** if the node's projected total
+would exceed `0.9`. It's also recommended as a cap so a VLM doesn't hog the node's
+unified memory. `served_model_name` (API alias(es)) and `max_model_len` are also accepted
+per-load overrides.
+
+### Node-targeted load (cluster)
+
+To load a VLM on a specific node, use the cluster route with the same override fields:
+
+```bash
+curl -X POST http://localhost:3000/api/cluster/load \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "node_id": "spark2",
+    "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "kv_cache_dtype": "auto",
+    "trust_remote_code": true,
+    "gpu_memory_utilization": 0.4
+  }'
+```
+
+### Opting into fp8 (advanced, discouraged)
+
+Setting `kv_cache_dtype: "fp8"` on a VLM flags the load as an **explicit** fp8 request,
+which **bypasses the safety downgrade** and honors your choice.
+
+<Warning>
+An explicit `fp8` on a VLM reintroduces **garbage output on GB10**. Only use it if you
+know your specific model / vLLM combination handles fp8 KV cache correctly.
+</Warning>
+
+## OCR / image usage
+
+Once a VLM is serving, query it through the federated router at
+`http://localhost:3000/v1/chat/completions` — it routes to whichever node holds the
+model, and is the **only** way to reach a VLM loaded on a remote node (like `spark2`
+above). On a single node you can also hit the raw vLLM engine directly at
+`:8000`. Send a chat message whose `content` is a list mixing a text part and an
+`image_url` part. The `url` can be an `http(s)` URL or a `data:` base64 URI. `model`
+is the served model name (or a `served_model_name` alias).
+
+```bash
+curl -X POST http://localhost:3000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Extract all text from this image."},
+          {"type": "image_url", "image_url": {"url": "https://example.com/receipt.png"}}
+        ]
+      }
+    ]
+  }'
+```
+
+For a local image, inline it as a data URI:
+
+```json
+{"type": "image_url", "image_url": {"url": "data:image/png;base64,<BASE64>"}}
+```

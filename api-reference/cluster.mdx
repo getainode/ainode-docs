@@ -1,17 +1,57 @@
 ---
 title: "Cluster API"
-description: "Inspect and manage the multi-node cluster."
+description: "Inspect, load onto, and update the multi-node cluster."
 ---
 
 ## Endpoints
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/nodes` | All discovered nodes |
-| GET | `/api/cluster/resources` | Aggregated VRAM + GPU counts |
+| GET | `/api/nodes` | All discovered nodes (incl. per-node `instances[]`) |
+| GET | `/api/cluster/resources` | Aggregated VRAM + GPU counts + per-node breakdown |
 | GET | `/api/cluster/info` | Cluster topology |
 | GET | `/api/status` | This node's status |
-| POST | `/api/cluster/role` | Set distributed role |
+| POST | `/api/cluster/load` | Load a model on any node (`{node_id, model, ...}`) |
+| POST | `/api/cluster/unload` | Unload a model on any node (`{node_id, model}`) |
+| POST | `/api/cluster/role` | Set this node's cluster/distributed role |
+| POST | `/api/cluster/id` | Set this node's cluster id |
+| POST | `/api/cluster/update-all` | Cluster-wide image pull + swap |
+| GET | `/api/cluster/update-status` | Live per-node update progress |
+
+## Load a model on a node
+
+`POST /api/cluster/load` loads a model on **any** node. A local `node_id` is
+handled directly; a remote `node_id` is forwarded over the fabric to that node's
+`/api/models/load` (the master never SSHes). Accepts the same per-load overrides
+as `/api/models/load`.
+
+```bash
+curl -X POST http://localhost:3000/api/cluster/load \
+  -d '{"node_id": "spark2", "model": "Qwen/Qwen2.5-7B-Instruct", "gpu_memory_utilization": 0.4}'
+```
+
+`POST /api/cluster/unload` mirrors it: `{"node_id": "spark2", "model": "..."}`.
+
+## Set role / id
+
+```bash
+# Set the distributed/cluster role for this node
+curl -X POST http://localhost:3000/api/cluster/role -d '{"role": "auto"}'
+
+# Set this node's cluster id
+curl -X POST http://localhost:3000/api/cluster/id -d '{"cluster_id": "default"}'
+```
+
+## Update the whole cluster
+
+`POST /api/cluster/update-all` pulls and swaps the image on every node over
+HTTP — workers first, master last, no SSH. Optional body `{"version": "0.5.2"}`;
+omit it to target the highest numeric GHCR tag. Poll progress:
+
+```bash
+curl -X POST http://localhost:3000/api/cluster/update-all -d '{}'
+curl "http://localhost:3000/api/cluster/update-status?id=<update_id>"
+```
 
 ## Node status
 
@@ -25,15 +65,29 @@ curl http://localhost:3000/api/nodes
     {
       "node_id": "spark1-head",
       "node_name": "spark-dgx-1",
+      "fabric_ip": "10.0.0.1",
       "status": "online",
       "engine_ready": true,
       "model": "Qwen/Qwen2.5-7B-Instruct",
       "gpu_name": "NVIDIA GB10",
-      "gpu_memory_gb": 121.7
+      "gpu_memory_gb": 121.7,
+      "gpu_memory_used_pct": 47,
+      "gpu_utilization": 62,
+      "gpu_temp": 58,
+      "distributed_mode": "solo",
+      "distributed_peers": [],
+      "instances": [
+        {"model": "Qwen/Qwen2.5-7B-Instruct", "api_port": 8000, "status": "serving"}
+      ]
     }
   ]
 }
 ```
+
+<Note>
+Each node reports an `instances[]` array covering its primary plus any stacked
+models on ports 8001+ — the same source the OpenAI proxy routes on.
+</Note>
 
 ## Cluster resources
 
@@ -43,8 +97,26 @@ curl http://localhost:3000/api/cluster/resources
 
 ```json
 {
-  "total_nodes": 4,
+  "total_vram_gb": 486.8,
+  "available_vram_gb": 486.8,
   "total_gpus": 4,
-  "total_vram_gb": 487
+  "total_nodes": 4,
+  "nodes": [
+    {
+      "node_id": "spark1-head",
+      "hostname": "spark-dgx-1",
+      "fabric_ip": "10.0.0.1",
+      "vram_gb": 121.7,
+      "gpus": 1,
+      "gpu_name": "NVIDIA GB10",
+      "unified_memory": true,
+      "status": "online",
+      "distributed_mode": "solo",
+      "ray_status": "head"
+    }
+  ],
+  "distributed_instance": null,
+  "distributed_instances": [],
+  "ray": {}
 }
 ```

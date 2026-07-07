@@ -4,22 +4,32 @@ description: "The open-source projects and community work that AINode builds on.
 icon: "heart"
 ---
 
-The inference and clustering core of AINode is powered by vLLM with
-community patches. Specifically, we inherit the robust NCCL implementation
-from [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)
-(`dgxspark-3node-ring` branch), which has proven most reliable for
-Grace-Blackwell unified memory and fabric (RoCE / 400G switch) topologies.
+The inference core of AINode is powered by vLLM. The shipped **default engine
+backend** is [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)
+(`dgxspark-3node-ring` branch) — its GB10 engine image
+(`ghcr.io/getainode/ainode-base`) drives both single-node (solo) serving and,
+via its launcher, distributed cluster formation, inheriting the robust NCCL
+implementation that has proven most reliable for Grace-Blackwell unified memory
+and fabric (RoCE / 400G switch) topologies. An **opt-in NVIDIA vLLM engine
+backend** (v0.5.0+; set `engine_backend: "nvidia"`) runs vLLM in NVIDIA's own
+container instead — the installer can pre-pull
+[`nvcr.io/nvidia/vllm:26.02-py3`](https://catalog.ngc.nvidia.com/) for it, but
+nothing consumes that image unless you switch backends.
 
-We are grateful to eugr and the broader vLLM / Ray / Spark community whose
-hard work on real hardware made this project possible.
+We are grateful to NVIDIA, eugr, and the broader vLLM / Ray / Spark community
+whose hard work on real hardware made this project possible.
 
 ## Key dependencies
 
 | Project | Role |
 |---|---|
-| [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) | GB10-patched vLLM containers, NCCL 3-node ring fix, cluster recipes |
 | [vLLM](https://github.com/vllm-project/vllm) | High-performance inference engine |
+| [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) | **Default engine** — GB10 NCCL 3-node ring fix, solo serving + distributed cluster launcher |
+| [NVIDIA vLLM image](https://catalog.ngc.nvidia.com/) | Optional engine container for the opt-in NVIDIA backend (`nvcr.io/nvidia/vllm`) |
 | [Ray](https://www.ray.io/) | Cross-node distributed orchestration |
 | [NCCL](https://developer.nvidia.com/nccl) | GPU-to-GPU collective communication |
 | [Hugging Face](https://huggingface.co/) | Model hub, Transformers, PEFT, Datasets |
+| [PEFT](https://github.com/huggingface/peft) | LoRA / QLoRA training + adapter merge |
+| [llm-compressor](https://github.com/vllm-project/llm-compressor) | In-browser quantization (AWQ / NVFP4) |
+| [hf_transfer](https://github.com/huggingface/hf_transfer) | Accelerated model downloads |
 | [aiohttp](https://docs.aiohttp.org/) | Async HTTP server for the API + web UI |

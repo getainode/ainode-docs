@@ -1,22 +1,102 @@
 ---
 title: "Models"
-description: "Download, manage, and launch models from the browser."
+description: "Download, install, launch, stack, and delete models from the browser."
 icon: "cube"
 ---
 
 ## Downloading models
 
-Open the **Downloads** tab. Three ways to add a model:
+Open the **Models** page. Four ways to add a model:
 
 1. **Catalog** — 50+ curated models, click to download
 2. **Search** — search Hugging Face live
 3. **Custom** — paste any HF repo ID (e.g. `microsoft/Phi-4`)
+4. **Installed** — models already present on disk across your cluster (see below)
 
-Downloads run in the background with a progress bar. Click **✕** to cancel.
+The **Custom** flow maps to `POST /api/models/download-repo`. Every download is
+**commit-pinned**: AINode resolves a single commit sha for the whole snapshot up
+front, so a repo pushed mid-download can never leave you with a mixed-commit
+directory.
+
+Downloads run in the background with a progress bar and are **genuinely
+cancellable**. Click **✕** to cancel — this is now a real cancel (in earlier
+builds it was a no-op that let the download run to completion). Downloads are
+parallel (`AINODE_DOWNLOAD_MAX_WORKERS`), per-file, and cancel-checked between
+files, so a cancelled 15 GB pull stops promptly.
+
+<Note>
+Cancel posts to `POST /api/models/download-cancel`. In-flight downloads are
+listed by `GET /api/models/downloads/active`.
+</Note>
+
+## Installed models
+
+The Models page shows an **Installed models on your cluster** list — every model
+present on disk on any node, not just entries that happen to be in the catalog.
+Each installed model card exposes per-model actions:
+
+- **Launch** — serve the model in vLLM (see below)
+- **Unload** — stop a running instance (frees GPU memory, keeps the files)
+- **Delete** — remove the on-disk snapshot (frees disk, see [Unload vs delete](#unload-vs-delete))
 
 ## Launching a model
 
-Once downloaded, click the model card → **▶ Launch Model**. AINode saves the model to config and restarts the engine.
+From an installed model card, click **▶ Launch Model**. The launch form lets you
+pick which **node** to load on and (for stacked loads) set memory. What happens
+depends on how many models are already running:
+
+- **First / solo load** — boots the primary engine at `:8000`.
+- **Second concurrent load — stacked** — appends a **new vLLM instance** on the
+  next free port (`8001`, `8002`, …) **without restarting the primary**. Your
+  first model keeps serving throughout.
+
+The launch form has a **node picker**. Node-targeted loads route through
+`POST /api/cluster/load` with the chosen `{node_id}` — not just the head node.
+The **Server** view also has a working **Load** button that does the same thing.
+
+### Stacked loads: explicit memory + admission guard
+
+Stacking a second model on a node has two hard requirements:
+
+- You **must** pass an explicit `gpu_memory_utilization` for a stacked load.
+  Omitting it returns **HTTP 400** (a default-sized second model can hard-crash
+  a GB10 node's unified memory).
+- The load is **admission-guarded**: if the node's projected *total* GMU across
+  all instances would exceed **0.9**, the load is rejected with **HTTP 409**
+  before any running instance is touched.
+
+`gpu_memory_utilization` is clamped to the range **0.05–0.95** per load.
+
+### Per-load overrides
+
+`POST /api/models/load` accepts optional overrides that are **persisted across
+restarts** (they replay when the node cold-boots):
+
+| Field | Purpose |
+|---|---|
+| `served_model_name` | One or more API aliases the model answers to |
+| `max_model_len` | Context length override |
+| `kv_cache_dtype` | KV cache dtype (e.g. `fp8`, `auto`) |
+| `quantization` | Quantization method override |
+| `trust_remote_code` | Allow custom modeling code |
+
+<Warning>
+Vision (VLM) models on GB10 must **not** use an fp8 KV cache — it corrupts
+generation. AINode auto-skips fp8 for multimodal models. If you need to force it
+back to the default, pass `kv_cache_dtype=auto` as a per-load override.
+</Warning>
+
+## Unload vs delete
+
+Two different actions — keep them straight:
+
+- **Unload** (`POST /api/models/unload`) stops a *running* instance and frees its
+  GPU memory. Stacked instances each have their own unload control, so you can
+  drop the model on `:8001` while the primary on `:8000` keeps serving. The
+  on-disk files stay put.
+- **Delete from disk** (`POST /api/models/delete-repo`) removes the snapshot from
+  disk and frees the GB it occupied. Use this when you're done with a model
+  entirely.
 
 ## Gated models
 
@@ -40,7 +120,8 @@ Any model compatible with vLLM works. Tested models include:
 
 ## Shared storage across cluster
 
-To avoid downloading the same model on every node, mount a shared NFS path:
+To avoid downloading the same model on every node, mount a shared NFS path and
+point `models_dir` at it on each node:
 
 ```json
 // ~/.ainode/config.json on each node
@@ -49,4 +130,7 @@ To avoid downloading the same model on every node, mount a shared NFS path:
 }
 ```
 
-See [Cluster Setup](/cluster-setup) for NFS configuration details.
+Shared NFS storage is the recommended default when you want a single copy of each
+model visible fleet-wide. (Alternatively, each node can keep its own on-disk copy
+and serve it locally.) See [Cluster Setup](/cluster-setup) for cluster
+configuration.

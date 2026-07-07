@@ -7,10 +7,17 @@ description: "Prometheus and JSON metrics endpoints."
 
 | URL | Format | Description |
 |---|---|---|
-| `GET http://localhost:8000/metrics` | Prometheus text | Scrape target for Prometheus / Grafana |
+| `GET http://localhost:3000/metrics` | Prometheus text | Scrape target for Prometheus / Grafana (`ainode_*`) |
 | `GET http://localhost:3000/api/metrics` | JSON | Full snapshot |
 | `GET http://localhost:3000/api/metrics/gpu` | JSON | GPU stats only |
 | `GET http://localhost:3000/api/metrics/requests` | JSON | Request stats with latency percentiles |
+
+<Note>
+AINode's Prometheus exposition — every `ainode_*` metric — is served by the
+aiohttp app on port **3000**, not 8000. Port `8000/metrics` is the raw vLLM
+container's native metrics (`vllm:*` names), a different metric set. Scrape
+`8000` only if you specifically want vLLM's native metrics.
+</Note>
 
 ## Prometheus scrape config
 
@@ -18,7 +25,7 @@ description: "Prometheus and JSON metrics endpoints."
 scrape_configs:
   - job_name: ainode
     static_configs:
-      - targets: ["<node-ip>:8000"]
+      - targets: ["<node-ip>:3000"]
 ```
 
 ## Key metrics
@@ -32,6 +39,7 @@ scrape_configs:
 | `ainode_tokens_per_second` | gauge | Average throughput |
 | `ainode_request_latency_milliseconds{quantile}` | summary | P50/P95/P99 latency |
 | `ainode_requests_by_model_total{model}` | counter | Per-model request counts |
+| `ainode_gpu_available` | gauge | 1/0 — whether the GPU is queryable via pynvml |
 | `ainode_gpu_utilization_percent` | gauge | GPU utilization 0–100 |
 | `ainode_gpu_memory_used_bytes` | gauge | GPU memory in use |
 | `ainode_gpu_memory_total_bytes` | gauge | Total GPU memory |
@@ -53,7 +61,7 @@ scrape_configs:
 - alert: AINodeGPUTemp
   expr: ainode_gpu_temperature_celsius > 85
 
-# Node down
+# Node down (matches the job_name: ainode scrape above)
 - alert: AINodeDown
   expr: up{job="ainode"} == 0
 ```

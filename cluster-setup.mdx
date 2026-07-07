@@ -5,9 +5,11 @@ description: "Connect multiple GB10 nodes into a single AI cluster with 487+ GB 
 
 ## Overview
 
-AINode discovers peers automatically via UDP broadcast on port 5679. Once discovered, the master can shard one large model across all GPUs using tensor-parallel inference over NCCL.
+AINode discovers peers automatically via UDP broadcast on port 5679. The primary multi-node mode is a **federated master**: each node serves its own model(s) solo, and the master routes `/v1/*` requests to the node holding the requested model. You load and unload any model on any node from the master UI.
 
-**Verified: 4× DGX Spark, 487 GB aggregated VRAM, NCCL over RoCE at 200 Gbps.**
+The master can also **shard one frontier model across all GPUs** using tensor-parallel inference over NCCL — but that is specifically for a **frontier MoE model that won't fit on a single node**. A model that fits on one node should run **TP=1**: cross-node tensor parallelism adds two all-reduces per layer over the fabric and does **not** speed up single-stream decode (it eats the per-node bandwidth gain).
+
+**Verified: 4× GB10 nodes (3× DGX Spark + 1× ASUS GX10), 487 GB aggregated VRAM, NCCL over RoCE at 200 Gbps.**
 
 ## Step 1: Install on each node
 
@@ -23,14 +25,16 @@ curl -fsSL https://ainode.dev/install | bash -s -- --job worker
 
 Navigate to `http://<master-ip>:3000` → **Cluster** tab. Nodes appear automatically as they start broadcasting.
 
-## Step 3: Launch distributed inference
+## Step 3: Load a model (federated) or launch a sharded model
 
-1. Go to **Config** → **Cluster**
-2. Set **Minimum Nodes** to the desired count
-3. Pick **Tensor Parallel** mode
-4. Click **Launch**
+From the launch form:
 
-The master SSHes into each worker, forms a Ray cluster, and starts vLLM with TP=N.
+1. Pick the model (catalog entry or Hugging Face repo ID).
+2. Use the **per-node picker** to choose where it runs — the head node is pinned with a star; toggle the peer dots to target specific nodes. (This replaced the old count-based "Minimum Nodes" selector in 0.4.14.)
+3. Set **`gpu_memory_utilization`** in the per-load input (required for a stacked 2nd+ load on a node).
+4. Launch.
+
+A node-targeted load POSTs explicit `node_ids` and routes through `/api/cluster/load` with the chosen `node_id`. For a frontier MoE model that needs the pooled memory of several nodes, select multiple nodes — the master SSHes into each peer, forms a Ray cluster, and starts vLLM with `--tensor-parallel-size N`.
 
 ## Network requirements
 
@@ -47,11 +51,19 @@ Use the direct fabric NIC (ConnectX-7 / `enP2p1s0f1np1`) for NCCL, not Tailscale
 
 ## VRAM reference
 
-| Nodes | Aggregated VRAM | Largest model |
+GB10 decode is memory-bandwidth bound, so the cluster pays off on **frontier MoE** models (which read only their active params per token) — not on stretching a dense model across nodes.
+
+| Nodes | Aggregated VRAM | Design-point workload |
 |---|---|---|
-| 1× GB10 | 122 GB | Llama 3.1 70B (fp16) |
-| 2× GB10 | 244 GB | Llama 3.1 70B (fp16) |
-| 4× GB10 | 487 GB | Llama 3.1 405B (AWQ) |
+| 1× GB10 | ~122 GB usable (128 GB unified) | Dense ≤32B, or an A3B-class MoE, TP=1 |
+| 2× GB10 | ~244 GB | Larger MoE, or capacity for stacked models |
+| 4× GB10 | ~487 GB | Frontier MoE (e.g. Qwen3.5-235B-A22B / 397B-A17B) sharded TP=4 |
+
+<Note>
+Dense 70B/405B "largest model" framing is a poor fit for this hardware: dense 70B
+caps near ~7–8 t/s single-stream and dense 405B ~1 t/s. The MoE models above stay
+fast (~16–17 t/s single-stream at TP=4) because decode only reads active params.
+</Note>
 
 ## Troubleshooting
 

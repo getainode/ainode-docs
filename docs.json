@@ -66,6 +66,8 @@
               "guides/chat",
               "guides/models",
               "guides/training",
+              "guides/autodata",
+              "guides/vision-models",
               "guides/distributed",
               "guides/update"
             ]
