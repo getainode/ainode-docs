@@ -1,19 +1,113 @@
 ---
 title: "Models API"
-description: "List, download, and manage models via REST."
+description: "Load, stack, download, and manage models via REST."
 ---
 
 ## Endpoints
 
 | Method | Path | Description |
 |---|---|---|
+| POST | `/api/models/load` | Load (and stack) a model on this node |
+| POST | `/api/models/unload` | Stop the instance serving a model |
 | GET | `/api/models` | Full model catalog |
 | GET | `/api/models/downloaded` | Models present on disk |
-| GET | `/api/models/downloads/active` | In-progress downloads |
+| GET | `/api/models/downloads/active` | All download jobs (running + recently finished) |
+| GET | `/api/models/download/status?job_id=<id>` | Poll a single download job |
 | POST | `/api/models/download-repo` | Start a download by HF repo ID |
 | POST | `/api/models/download-cancel` | Cancel an in-progress download |
-| DELETE | `/api/models/{model_id}` | Delete a downloaded model |
-| POST | `/api/engine/set-model` | Switch active model + restart engine |
+| POST | `/api/models/delete-repo` | Delete any downloaded HF repo from disk (free GB) |
+| DELETE | `/api/models/{model_id}` | Delete a downloaded **catalog** model |
+| POST | `/api/engine/set-model` | Switch active model + restart engine (legacy) |
+
+Catalog / discovery GETs also exist: `/api/models/search?q=`,
+`/api/models/trending`, `/api/models/latest`, `/api/models/recommended`,
+`/api/models/openrouter`, `/api/models/ollama`, `GET /api/models/{model_id}`,
+`POST /api/models/refresh`, and `POST /api/models/{model_id}/download`.
+
+## Load a model
+
+`POST /api/models/load` is the primary way to bring a model up. Each model gets
+its own container/port, so several **stack** on one node with no full restart.
+
+```bash
+curl -X POST http://localhost:3000/api/models/load \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen2.5-7B-Instruct"}'
+```
+
+Success returns:
+
+```json
+{
+  "status": "launching",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "instance_id": "spark1-head:Qwen/Qwen2.5-7B-Instruct",
+  "api_port": 8000,
+  "stacked": false,
+  "distributed": false
+}
+```
+
+### Body fields
+
+| Field | Type | Description |
+|---|---|---|
+| `model` | string | HF repo id (required) |
+| `gpu_memory_utilization` | float | vLLM GPU reservation for this instance (0.05–0.95) |
+| `served_model_name` | string or list | API alias(es) the model answers to |
+| `max_model_len` | int | Context length override |
+| `kv_cache_dtype` | string | e.g. `fp8`, `auto` |
+| `quantization` | string | e.g. `awq`, `nvfp4` |
+| `trust_remote_code` | bool | Allow custom modeling code |
+| `strategy` | string | `auto` \| `tensor_parallel` \| `pipeline_parallel` |
+
+<Note>
+Per-load overrides are **persisted and replayed on restart** — onto `NodeConfig`
+for the node's primary model and onto the instance manifest for stacked models —
+so they survive `systemctl restart ainode`.
+</Note>
+
+### Stacked-load admission control
+
+Loading a 2nd+ model on a node is admission-guarded to protect unified memory:
+
+- If `gpu_memory_utilization` is omitted on a stacked load → HTTP **400**
+  (`A stacked load ... must specify gpu_memory_utilization explicitly`).
+- If existing reservations + the requested value exceed **0.90** total → HTTP
+  **409** (`Refusing stacked load ... > 0.90 cap`).
+
+A rejection leaves the already-running models untouched.
+
+## Load on a specific node
+
+To target a node by id, use the cluster route — it forwards to that node's
+`/api/models/load` over the fabric (no SSH):
+
+```bash
+curl -X POST http://localhost:3000/api/cluster/load \
+  -d '{"node_id": "spark2", "model": "Qwen/Qwen2.5-7B-Instruct", "gpu_memory_utilization": 0.4}'
+```
+
+## Unload a model
+
+`POST /api/models/unload` is instance-aware: it stops the one instance serving
+that model; other stacked models keep serving. It fans out to peers when the
+model lives on another node.
+
+```bash
+curl -X POST http://localhost:3000/api/models/unload \
+  -d '{"model": "Qwen/Qwen2.5-7B-Instruct"}'
+```
+
+```json
+{
+  "stopped": true,
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "instance_id": "spark1-head:Qwen/Qwen2.5-7B-Instruct",
+  "remaining": 1,
+  "errors": []
+}
+```
 
 ## Download a model
 
@@ -23,7 +117,16 @@ curl -X POST http://localhost:3000/api/models/download-repo \
   -d '{"hf_repo": "Qwen/Qwen2.5-7B-Instruct"}'
 ```
 
-Returns `{"job_id": "...", "status": "downloading"}`.
+Returns HTTP **202** with `{"job_id": "...", "hf_repo": "...", "status": "downloading"}`.
+The body accepts `hf_repo`, `repo`, or `model_id`; a value without a `/` is
+rejected with 400. Downloads are commit-pinned (one resolved SHA threaded to
+every file), intra-repo parallel, and genuinely cancellable file-by-file.
+
+Poll a single job:
+
+```bash
+curl "http://localhost:3000/api/models/download/status?job_id=<job_id>"
+```
 
 ## Cancel a download
 
@@ -32,13 +135,37 @@ curl -X POST http://localhost:3000/api/models/download-cancel \
   -d '{"job_id": "<job_id>"}'
 ```
 
-Stops the download and cleans up partial files.
+Returns 404 if the job is unknown, 409 if it isn't in the `downloading` state.
+On success it sets the status to `cancelling` and removes the partial files.
 
-## Switch active model
+## Delete a model from disk
+
+`POST /api/models/delete-repo` deletes **any** downloaded HF repo directory and
+reports the reclaimed space — the "free GB from disk" path.
+
+```bash
+curl -X POST http://localhost:3000/api/models/delete-repo \
+  -d '{"hf_repo": "Qwen/Qwen2.5-7B-Instruct"}'
+```
+
+```json
+{ "status": "deleted", "hf_repo": "Qwen/Qwen2.5-7B-Instruct", "freed_gb": 15.3 }
+```
+
+<Note>
+`DELETE /api/models/{model_id}` only works for models **in the catalog** and
+returns 404 (`not found in catalog`) for an arbitrary downloaded repo. Use
+`delete-repo` to free disk for any repo.
+</Note>
+
+## Switch active model (legacy)
 
 ```bash
 curl -X POST http://localhost:3000/api/engine/set-model \
   -d '{"model": "Qwen/Qwen2.5-7B-Instruct"}'
 ```
 
-Saves to config and restarts the vLLM engine.
+Saves to config and restarts the vLLM engine. `model` must be an `org/name`
+repo id or the call returns 400. This is the legacy single-model restart path —
+prefer `/api/models/load`, which stacks, avoids a full restart, and accepts
+per-load overrides.

@@ -3,11 +3,19 @@ title: "Chat & Completions"
 description: "OpenAI-compatible inference endpoints."
 ---
 
-All inference endpoints are on port **8000** and follow the OpenAI API spec exactly.
+The raw single-node vLLM serves these endpoints on port **8000**. The AINode
+aiohttp proxy **also** serves them on port **3000** with cross-node routing and
+failover — pick the port by deployment:
+
+<Note>
+On a **multi-node** cluster, target port **3000**. The proxy forwards each
+request to whichever node serves the requested model and fails over if a node
+drops. Port `8000` only ever reaches the one node's local vLLM.
+</Note>
 
 ## Chat completions
 
-`POST http://localhost:8000/v1/chat/completions`
+`POST http://localhost:3000/v1/chat/completions`
 
 ```json
 {
@@ -22,19 +30,31 @@ All inference endpoints are on port **8000** and follow the OpenAI API spec exac
 }
 ```
 
+## Text completions
+
+`POST http://localhost:3000/v1/completions`
+
+```json
+{
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "prompt": "The quick brown fox",
+  "max_tokens": 64
+}
+```
+
 ## Streaming
 
 Set `"stream": true` — response is server-sent events, same as OpenAI.
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "Qwen/Qwen2.5-7B-Instruct", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'
 ```
 
 ## Embeddings
 
-`POST http://localhost:8000/v1/embeddings`
+`POST http://localhost:3000/v1/embeddings`
 
 ```json
 {
@@ -45,14 +65,16 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## List models
 
-`GET http://localhost:8000/v1/models`
+`GET http://localhost:3000/v1/models`
 
-Returns the currently loaded model(s).
+On port **3000** this returns the **federated union** of models served across
+the whole fleet. On port **8000** it returns only that one node's local vLLM
+models.
 
 ## Compatible clients
 
 - Python: `openai` SDK, `langchain`, `litellm`
 - Node.js: `openai` npm package
 - Go: `sashabaranov/go-openai`
-- Open WebUI: set base URL to `http://localhost:8000/v1`
+- Open WebUI: set base URL to `http://localhost:3000/v1`
 - Anything else that speaks OpenAI

@@ -1,6 +1,6 @@
 ---
 title: "Training API"
-description: "Submit, monitor, and retrieve fine-tuning jobs via REST."
+description: "Submit, monitor, and retrieve fine-tuning jobs — plus AutoData synthetic-data runs — via REST."
 ---
 
 ## Endpoints
@@ -14,12 +14,20 @@ description: "Submit, monitor, and retrieve fine-tuning jobs via REST."
 | GET | `/api/training/jobs/{id}/logs` | Tail logs (`?tail=N`) |
 | GET | `/api/training/jobs/{id}/output` | List output artifacts |
 | GET | `/api/training/jobs/{id}/output/{file}` | Download an artifact |
-| POST | `/api/training/jobs/{id}/merge` | Merge LoRA into base model |
+| POST | `/api/training/jobs/{id}/merge` | Merge LoRA/QLoRA into base model |
 | POST | `/api/training/jobs/{id}/resume` | Resume from checkpoint |
 | GET | `/api/training/templates` | List templates (built-in + custom) |
 | POST | `/api/training/templates` | Save a custom template |
 | GET | `/api/training/stats` | Aggregate counters |
 | POST | `/api/training/estimate` | Memory/time estimates |
+| POST | `/api/training/autodata` | Start an AutoData synthetic-data run |
+| GET | `/api/training/autodata/{run_id}` | Poll an AutoData run |
+
+<Note>
+LoRA/QLoRA training **and** adapter-merge run in a spawned GPU container — the
+shipped slim orchestrator has no torch/peft. Quantize jobs run llm-compressor
+(AWQ/NVFP4) in a GPU container the same way.
+</Note>
 
 ## Submit a job
 
@@ -37,15 +45,32 @@ curl -X POST http://localhost:3000/api/training/jobs \
   }'
 ```
 
-Response:
+Returns HTTP **201** with the job's full status object:
 
 ```json
 {
   "job_id": "abc123",
   "status": "pending",
-  "config": { "base_model": "...", "method": "lora", ... }
+  "progress": 0.0,
+  "current_epoch": 0,
+  "current_loss": null,
+  "start_time": null,
+  "end_time": null,
+  "elapsed_seconds": null,
+  "config": { "base_model": "...", "method": "lora", "...": "..." }
 }
 ```
+
+## Training methods
+
+`method` accepts:
+
+| Method | Description |
+|---|---|
+| `lora` | LoRA fine-tune (default) |
+| `qlora` | Quantized LoRA fine-tune |
+| `full` | Full fine-tune (DDP across GPUs/nodes) |
+| `quantize` | Not a fine-tune — produces a servable AWQ/NVFP4 checkpoint via llm-compressor |
 
 ## Training config fields
 
@@ -53,6 +78,7 @@ Response:
 {
   "base_model": "Qwen/Qwen2.5-7B-Instruct",
   "dataset_path": "path/or/hf-dataset-id",
+  "dataset_id": "ds_abc123",
   "method": "lora",
   "num_epochs": 3,
   "batch_size": 4,
@@ -60,16 +86,96 @@ Response:
   "lora_rank": 16,
   "lora_alpha": 32,
   "max_seq_length": 2048,
+  "gradient_accumulation_steps": 1,
+  "warmup_steps": 0,
+  "weight_decay": 0.0,
   "eval_split": 0.1,
   "eval_steps": 0,
   "use_gradient_checkpointing": false,
   "distributed": false,
   "num_nodes": 1,
+  "output_dir": "my-run",
+  "template_id": "chatml",
+  "description": "run notes",
   "hf_token": "hf_xxx",
   "wandb_project": "my-project",
   "run_name": "alpaca-7b-run1"
 }
 ```
+
+<Note>
+Use **either** `dataset_path` **or** `dataset_id`. `dataset_id` references a
+registered dataset in the DatasetManager — this is the AutoData → training
+handoff (see below).
+</Note>
+
+### Quantize-job fields (`method: "quantize"`)
+
+```json
+{
+  "base_model": "Qwen/Qwen2.5-7B-Instruct",
+  "method": "quantize",
+  "scheme": "awq",
+  "calib_dataset": "HuggingFaceH4/ultrachat_200k",
+  "calib_samples": 256,
+  "out_slug": "Qwen--Qwen2.5-7B-Instruct-awq",
+  "push_to_hf": false,
+  "hf_repo": "my-org/my-quant"
+}
+```
+
+`scheme` is `awq` or `nvfp4`. A quantize submit while the node is serving a
+model returns HTTP **409** unless `force: true` — quantization needs the node's
+full unified memory.
+
+## AutoData — Δ-filtered synthetic data
+
+AutoData is a Δ-filter synthetic-data utility (pure HTTP, no torch). A run
+writes ShareGPT JSONL, registers it as a dataset, and returns a `dataset_id`
+that drops straight into a training job.
+
+```bash
+curl -X POST http://localhost:3000/api/training/autodata \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": { "...AutoDataConfig...": "..." },
+    "meta": true,
+    "target_yield": 30,
+    "max_rounds": 4,
+    "name": "my-autodata-set",
+    "description": "Δ-filtered synthetic dataset"
+  }'
+```
+
+Returns HTTP **202**:
+
+```json
+{ "run_id": "a1b2c3d4e5f6", "status": "running", "poll": "/api/training/autodata/a1b2c3d4e5f6" }
+```
+
+Poll it:
+
+```bash
+curl http://localhost:3000/api/training/autodata/a1b2c3d4e5f6
+```
+
+```json
+{
+  "run_id": "a1b2c3d4e5f6",
+  "status": "completed",
+  "meta": true,
+  "dataset_id": "ds_abc123",
+  "report": { "kept": 420, "best_yield": 0.31, "best_lift": 0.458, "best_score": 0.71, "best_significant": true },
+  "rounds": [ ],
+  "out": "/…/datasets/autodata-a1b2c3d4e5f6.jsonl",
+  "error": null
+}
+```
+
+On completion the generated JSONL is registered as a dataset; feed the returned
+`dataset_id` into `POST /api/training/jobs`. A meta/val-set run reports
+`best_lift`, `best_score`, and `best_significant` — the held-out lift objective
+the optimizer actually maximized.
 
 ## List output artifacts
 
@@ -96,9 +202,26 @@ curl http://localhost:3000/api/training/jobs/abc123/output
 curl -X POST http://localhost:3000/api/training/jobs/abc123/merge
 ```
 
-Returns a `merge_job_id` to poll with `GET /api/training/jobs/{merge_job_id}`.
+Requires the source job's status to be `completed` and its method to be `lora`
+or `qlora` (else 409/400). Returns HTTP **202**:
+
+```json
+{
+  "merge_job_id": "def456",
+  "source_job_id": "abc123",
+  "adapter_dir": "/…/abc123",
+  "output_dir": "/…/merged",
+  "status": "running",
+  "message": "Merge started. Poll GET /api/training/jobs/{merge_job_id} for status."
+}
+```
+
+Poll the merge with `GET /api/training/jobs/{merge_job_id}`.
 
 ## Resume from checkpoint
+
+Requires the source job's status to be `failed`, `cancelled`, or `completed`
+(else 409).
 
 ```bash
 # Use latest checkpoint
@@ -107,4 +230,17 @@ curl -X POST http://localhost:3000/api/training/jobs/abc123/resume
 # Specify a checkpoint
 curl -X POST http://localhost:3000/api/training/jobs/abc123/resume \
   -d '{"checkpoint": "checkpoint-500"}'
+```
+
+Returns HTTP **201**:
+
+```json
+{
+  "resume_job_id": "ghi789",
+  "source_job_id": "abc123",
+  "checkpoint": "checkpoint-500",
+  "checkpoint_path": "/…/abc123/checkpoint-500",
+  "available_checkpoints": ["checkpoint-500", "checkpoint-250"],
+  "status": "pending"
+}
 ```

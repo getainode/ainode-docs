@@ -11,10 +11,24 @@ description: "Configure a node as master, worker, or solo."
 | **worker** | `ainode role worker` | No engine — starts instantly, waits for master to assign work |
 | **solo** | `ainode role solo` | Standalone node, no clustering (default) |
 
+<Note>
+Setting the **worker** role also clears the node's served model, so the engine is
+skipped on start. A worker won't serve anything until the master assigns it work.
+</Note>
+
 ## Set at install time
 
+Solo is the default — no flag needed. A master node takes its peer list at install
+time so it can SSH-bootstrap the cluster:
+
 ```bash
-curl -fsSL https://ainode.dev/install | bash -s -- --job master
+# solo (default)
+curl -fsSL https://ainode.dev/install | bash
+
+# master with peers
+AINODE_PEERS="10.0.0.2,10.0.0.3" curl -fsSL https://ainode.dev/install | bash -s -- --job master
+
+# worker
 curl -fsSL https://ainode.dev/install | bash -s -- --job worker
 ```
 

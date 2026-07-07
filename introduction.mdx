@@ -10,7 +10,7 @@ description: "Turn any NVIDIA GPU into a complete local AI platform."
   style={{ margin: "0 auto 2rem", display: "block" }}
 />
 
-AINode is a free, open-source platform that turns any NVIDIA GPU machine into a complete local AI stack — browser chat UI, OpenAI-compatible API, LoRA fine-tuning, and automatic multi-node clustering over NCCL.
+AINode is a free, open-source platform that turns any NVIDIA GPU machine into a complete local AI stack — browser chat UI, OpenAI-compatible API, LoRA fine-tuning, and a federated multi-node master that routes requests across nodes (or shards a frontier MoE model across GPUs over NCCL).
 
 **One command to install. No cloud. No monthly bill.**
 
@@ -36,7 +36,7 @@ curl -fsSL https://ainode.dev/install | bash
     LoRA, QLoRA, and full fine-tune from the browser. No notebooks.
   </Card>
   <Card title="Multi-node clustering" icon="server" href="/guides/distributed">
-    Automatic peer discovery. One model sharded across all GPUs in the cluster.
+    Automatic peer discovery. The master routes requests to the node serving each model — or shards a frontier MoE model across GPUs.
   </Card>
   <Card title="Prometheus metrics" icon="chart-line" href="/api-reference/metrics">
     `/metrics` endpoint for Grafana, Prometheus, VictoriaMetrics.
@@ -51,7 +51,7 @@ curl -fsSL https://ainode.dev/install | bash
 
 | Hardware | Manufacturer | GPU memory | Price | Status |
 |---|---|---|---|---|
-| DGX Spark | NVIDIA | 128 GB unified | $3,999 | ✅ Verified — TP=4, 487 GB cluster |
+| DGX Spark | NVIDIA | 128 GB unified (~122 GB usable) | $3,999 | ✅ Verified — TP=4, 487 GB cluster |
 | Ascent GX10 | ASUS | 128 GB unified | $2,999 | ✅ Verified |
 | Pro Max with GB10 (FCM1253) | Dell | 128 GB unified | TBD | ✅ Supported |
 | ZGX Nano AI Station | HP | 128 GB unified | TBD | ✅ Supported |
@@ -141,18 +141,23 @@ vLLM works best on Ampere (sm_80) or newer. Turing (RTX 20-series) is supported 
 
 ## Architecture
 
-AINode ships as a single unified container image. Every node in the cluster runs the same image.
+AINode ships as a slim (~500 MB) orchestrator container. The installer resolves the **highest numeric GHCR tag** and pulls that pinned image (e.g. `ghcr.io/getainode/ainode:0.5.2`) — never a floating `:latest` (it only falls back to `:latest` if tag resolution fails). The resolved tag is written to `~/.ainode/image.env`. Every node in the cluster runs the same image.
 
 ```
-ghcr.io/getainode/ainode:latest   ← pulled by the installer
+ghcr.io/getainode/ainode:0.5.2   ← pinned tag resolved + pulled by the installer
+         │  (slim ~500 MB orchestrator — no torch, no vLLM in this image)
          │
          ├── aiohttp web server (chat UI + API proxy, port 3000 / 8000)
-         ├── vLLM inference engine (launched as subprocess)
+         ├── engine launcher → separate GPU engine container
+         │       (eugr `ghcr.io/getainode/ainode-base` by default; NVIDIA backend opt-in)
+         │       runs `vllm serve` via the mounted Docker socket
          ├── UDP discovery broadcaster (port 5679)
-         └── training pipeline (LoRA / QLoRA / Full)
+         └── training pipeline (LoRA / QLoRA / Full — spawned GPU container)
 ```
 
-No host Python venv. No source builds. Upgrade is `ainode update`.
+The vLLM engine is **not** an in-process subprocess: the slim orchestrator launches a separate vLLM engine container over the mounted Docker socket. The **default engine backend** is eugr/spark-vllm-docker (`ghcr.io/getainode/ainode-base`); an **opt-in** NVIDIA backend (`engine_backend: "nvidia"`, v0.5.0+) runs vLLM in NVIDIA's container instead. No host Python venv. No source builds.
+
+The systemd unit reads the pinned tag from an `image.env` `EnvironmentFile` and runs `Restart=always`, so units are swappable and survive cold power cycles with automatic model replay on boot. Upgrade is `ainode update`, which resolves + pulls the newest numeric tag, rewrites `image.env`, and restarts.
 
 ---
 

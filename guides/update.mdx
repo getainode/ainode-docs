@@ -10,42 +10,95 @@ icon: "arrow-up"
 ainode update
 ```
 
-Pulls `ghcr.io/getainode/ainode:latest` and restarts the systemd service. Models, config, and training artifacts are never touched.
+This resolves the **highest numeric GHCR tag** and pulls *that pinned tag* — it
+never pulls a floating `:latest`. It then writes `~/.ainode/image.env` (atomically,
+via temp-file + rename) so the systemd unit boots the new image, and restarts the
+service. Models, config, and training artifacts are never touched.
+
+## How updating actually works
+
+AINode's systemd unit reads the image tag from `~/.ainode/image.env` via an
+`EnvironmentFile` and runs with `Restart=always`. An update is therefore:
+
+1. `docker pull` the target image
+2. Write the tag to `image.env`
+3. `docker stop ainode` — `Restart=always` relaunches the container on the new image
+
+`systemctl` is deliberately **not** called from inside the container (it doesn't
+work there). Because the tag lives in `image.env` and the unit restarts on its
+own, a node survives a **cold power cycle** and comes back on the pinned image
+with **automatic model replay**.
+
+<Note>
+Units that predate the swappable-image unit will pull and pin the new image but
+refuse to self-restart — they tell you to re-run the installer
+(`curl -fsSL https://ainode.dev/install | bash`) to migrate the unit and boot the
+new image.
+</Note>
 
 ## Update from the browser
 
-When a newer version is available on GHCR, a pulsing **⬆ Update available: vX.Y.Z** badge appears in the top bar of the web UI. Click it to update in place — no terminal needed.
+When a newer version is available on GHCR, a pulsing **⬆ Update available: vX.Y.Z**
+badge appears in the top bar of the web UI (the UI polls `GET /api/version/check`;
+versions are compared as numeric tuples). Click the badge to update in place — it
+posts to `POST /api/engine/update` on that node. No terminal needed.
+
+<Note>
+If the `docker pull` fails, the node keeps running its current image — no
+`image.env` write and no restart happen. An update can't leave a node in a broken
+half-updated state.
+</Note>
 
 ## Update the entire cluster at once
 
-From the master node's web UI, the **CLUSTER pill** (top of the topology view) has an **⬆ Update all** button. Click it to:
+From the master node's web UI, the **CLUSTER pill** (top of the topology view) has
+an **⬆ Update all** button. The confirm dialog reads: *"Each node will docker pull
++ restart. The master updates last."* Click it to:
 
-1. SSH into every discovered worker in parallel and run `docker pull + systemctl restart`
-2. Update the master node itself last
-3. Watch per-node progress live (pending → updating → done / failed)
+1. Update every discovered worker via **HTTP** — the master calls
+   `POST /api/engine/update` on each worker's API port. **No SSH is required.**
+2. Update the **master node itself last**, so it stays reachable while workers
+   upgrade.
+3. Watch per-node progress live via `GET /api/cluster/update-status` (pending →
+   updating → done / failed).
 
 This is the recommended way to keep a multi-node cluster in sync.
 
 ## Pin a specific version
 
+Pass the version as a **positional argument**:
+
 ```bash
-AINODE_IMAGE=ghcr.io/getainode/ainode:0.4.4 ainode update
+ainode update 0.5.2
 ```
+
+<Warning>
+Do **not** use `AINODE_IMAGE=…:X.Y.Z ainode update` to pin a version. With an
+empty positional argument the wrapper runs tag resolution and pulls the *latest*
+tag, ignoring `AINODE_IMAGE`. The positional form (`ainode update 0.5.2`) is the
+only correct way to pin.
+</Warning>
 
 ## Rollback
 
+Same positional syntax — name the older version you want:
+
 ```bash
-AINODE_IMAGE=ghcr.io/getainode/ainode:0.4.3 ainode update
+ainode update 0.5.0
 ```
 
 ## Check current version
 
 ```bash
 ainode --version
-# → ainode 0.4.4
+# → ainode wrapper (image: ghcr.io/getainode/ainode:0.5.2)
 ```
+
+The host wrapper prints its pinned image tag, then execs the container's own
+`--version`.
 
 ## Version history
 
+- Current release: **0.5.2**
 - [CHANGELOG](https://github.com/getainode/ainode/blob/main/CHANGELOG.md)
 - [All releases](https://github.com/getainode/ainode/releases)

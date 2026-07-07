@@ -9,6 +9,16 @@ description: "Up and running in under 60 seconds."
 - NVIDIA GPU with CUDA 13 drivers
 - [Docker Engine](https://docs.docker.com/engine/install/)
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
+- **`/mnt/shared-models` must exist** — the installer aborts without it. Create it first:
+  ```bash
+  sudo mkdir -p /mnt/shared-models
+  ```
+  For a cluster, mount shared model storage there (NFS from the master is recommended).
+- **NGC access is optional — only for the opt-in NVIDIA engine backend.** AINode's default engine (eugr/spark-vllm-docker) needs no NGC credentials and inference starts without them. If you plan to switch to the NVIDIA vLLM backend (`engine_backend: "nvidia"`, v0.5.0+), provide NGC credentials before (or right after) install so its image can pull:
+  ```bash
+  docker login nvcr.io          # username: $oauthtoken   password: your NGC API key
+  # ...or set NGC_API_KEY, or place the key in /etc/ainode/ngc.token
+  ```
 
 ## Install
 
@@ -17,10 +27,11 @@ curl -fsSL https://ainode.dev/install | bash
 ```
 
 The installer:
-1. Pulls `ghcr.io/getainode/ainode:latest` (~18 GB, one-time)
-2. Writes `/etc/systemd/system/ainode.service`
-3. Installs `/usr/local/bin/ainode` host wrapper
-4. Starts the service
+1. Pulls the **AINode orchestrator** — a slim ~500 MB image, resolved to the **highest numeric GHCR tag** (e.g. `ghcr.io/getainode/ainode:0.5.2`) and pinned into `~/.ainode/image.env` (never a floating `:latest`).
+2. Optionally pre-pulls the **NVIDIA vLLM engine image** `nvcr.io/nvidia/vllm:26.02-py3` (~15 GB, 5–10 minutes on a 1 Gbps link) — a best-effort convenience for users who opt into the NVIDIA backend. It's skipped without NGC credentials and install continues; the **default eugr engine** doesn't need it.
+3. Writes `/etc/systemd/system/ainode.service` (system mode) — or `~/.config/systemd/user/ainode.service` in `--user` mode.
+4. Installs `/usr/local/bin/ainode` host wrapper.
+5. Starts the service.
 
 ## Open the UI
 
@@ -28,7 +39,7 @@ The installer:
 http://localhost:3000
 ```
 
-First visit runs onboarding — pick a model and AINode starts loading it in the background. The UI is available immediately; the chat activates once the model finishes loading.
+First visit runs onboarding — it writes `onboarded: true` with no model selected. Pick a model in the UI and AINode starts loading it in the background. The UI is available immediately; the chat activates once the model finishes loading.
 
 ## API
 
@@ -52,7 +63,8 @@ print(resp.choices[0].message.content)
 ## Upgrade
 
 ```bash
-ainode update
+ainode update            # newest numeric tag
+ainode update 0.5.2      # or an explicit version
 ```
 
-Pulls `:latest` and restarts the service. Your models, config, and training runs are never touched.
+`ainode update` resolves the **highest numeric GHCR tag** (or the version you name), pulls it, pins it into `~/.ainode/image.env`, and restarts the service — it never pulls a floating `:latest`. Your models, config, and training runs are never touched (the config dir is a bind mount).
