@@ -1,0 +1,184 @@
+---
+title: "Tested Models"
+description: "Every model we have measured on AINode, what we have not measured, and how to run the bench yourself."
+icon: "gauge"
+---
+
+## What "tested" means here
+
+A model is on this page only if all three of these are true:
+
+1. **It was launched through AINode**, not with a hand-written `docker run`. If we
+   served it raw, outside the product, it does not count.
+2. **Somebody measured it on our own hardware** and the numbers below are what the
+   engine reported, not a vendor slide and not an extrapolation.
+3. **The run is committed** as a JSON record in
+   [`bench/results/`](https://github.com/getainode/ainode/tree/main/bench/results)
+   in the product repo, so you can read the exact node, engine image, vLLM flags
+   and settings behind every number.
+
+Everything else is untested, and this page says so out loud. Absence of a model
+here is not a claim that it fails; it is a claim that we have not measured it.
+
+<Note>
+The table is generated from those JSON files by `scripts/render-bench-table.py`,
+so the page cannot drift from the data. A measurement nobody took renders as
+**not measured** rather than as a zero or a guess.
+</Note>
+
+## The runs
+
+{/* BEGIN bench-table */}
+
+| Model | Params / active | Quant | Placement | Single-stream tok/s | 16 streams tok/s | Rubric | Date | Run |
+|---|---|---|---|---|---|---|---|---|
+| Ornith 1.5 35B-A3B | 35B / 3B active | NVFP4 | Spark-1-DGX, 1× GB10, TP=1 (stacked) | 40.0 | 269.2 | 19/19 | 2026-09-13 | [text-only-mtp](https://github.com/getainode/ainode/blob/main/bench/results/20260913-130400-ornith-1_5-35b-a3b-nvfp4-text-only-mtp.json) |
+| Qwen3.8 27B | 27B dense | NVFP4 | Spark-3-DGX, 1× GB10, TP=1 | 19.0 | 147.0 | 23/23 | 2026-08-15 | [mtp-vision](https://github.com/getainode/ainode/blob/main/bench/results/20260815-000000-qwen3_8-27b-nvfp4-mtp-vision.json) |
+| Nemotron 3.5 Lightning 30B-A3B | 30B / 3B active | NVFP4 | Spark-4-GX10, 1× GB10, TP=1 | 104.5 | 504.3 | 19/19 | 2026-08-13 | [dspark-recipe](https://github.com/getainode/ainode/blob/main/bench/results/20260813-000000-nvidia-nemotron-3_5-lightning-30b-a3b-nvfp4-dspark-recipe.json) |
+| Qwen3 235B-A22B | 235B / 22B active | NVFP4 | Spark-1..4, 4× GB10, TP=4 | 16.5 | not measured | not run | 2026-06-17 | [tp4-frontier-moe](https://github.com/getainode/ainode/blob/main/bench/results/20260617-000000-qwen3-235b-a22b-nvfp4-tp4-frontier-moe.json) |
+
+{/* END bench-table */}
+
+**Single-stream tok/s** is decode speed for one request at a time. **16 streams
+tok/s** is the aggregate across 16 concurrent requests, which is the number an
+agent or multi-user workload actually gets. **Rubric** is a correctness pass, not
+a speed one: a fresh agent drives the served endpoint through executed code,
+parallel tool calls, and needle retrieval at three context depths, with thinking
+on and off. Click the run label to read the full record.
+
+A few results that the table cannot hold:
+
+- **Nemotron 3.5 Lightning 30B-A3B** reproduces NVIDIA's 500+ tok/s claim at 16
+  streams, with DSpark speculative decode accepting 55-61% of drafted tokens.
+  With thinking off it answers in about 0.1 s, which makes it the right model for
+  plumbing calls.
+- **Qwen3.8 27B** is dense, so it is bandwidth-bound on GB10: 19.0 tok/s with
+  Qwen3.5 MTP speculative decode against 11.8 tok/s without it. OCR on it needs
+  `temperature 0`, and it must not run with an fp8 KV cache
+  (see [Vision Models](/guides/vision-models)).
+- **Ornith 1.5 35B-A3B** was measured as a *stacked* second instance at
+  `gpu_memory_utilization=0.26`, not as the only model on its node. Decode over
+  depth: 40.0 tok/s at 4K prompt tokens down to 34.4 tok/s at 120K, with TTFT
+  going from 194 ms to 136 s. Prefill is capped around 880 tok/s at 120K because
+  speculative decode pins `max_num_batched_tokens` at 2048.
+- **Qwen3-235B-A22B** is the only multi-node row: TP=4 across four GB10 nodes at
+  16.5 tok/s single-stream, surviving a 3,513-token prefill. `--enforce-eager` is
+  required on GB10 sm120, where vLLM's FlashInfer prefill kernel raises an
+  illegal instruction under CUDA-graph capture.
+
+## What is tested
+
+- **Single-node MoE through the AINode launch path**, on both a DGX Spark and an
+  ASUS GX10, including a concurrency sweep to 16 streams and a full rubric.
+- **Single-node dense**, with and without MTP speculative decode.
+- **Model stacking**: two engines on one node, both routed by model id through the
+  one AINode API endpoint.
+- **Decode over context depth**, from 4K to 120K prompt tokens, with a unique
+  nonce per request so prefix caching cannot make long context look free.
+- **Four-node TP=4 on frontier MoE**, measured June 2026 on AINode 0.4.x.
+- **Correctness separately from speed**, via the rubric described above.
+
+## What is not tested yet
+
+<Warning>
+These are real gaps, not omissions. If you need one of them, measure it and send
+us the record.
+</Warning>
+
+- **Vision on Ornith 1.5.** It is launched text-only with
+  `--limit-mm-per-prompt {"image":0,"video":0}` because the API server's
+  multimodal warmup OOM-killed the engine core on a node with roughly 35 GB free.
+  No vision numbers, no vision rubric.
+- **TP=4 through the current launch path.** The 235B row was measured on 0.4.x
+  with the `scitrera/dgx-spark-vllm` image. It has not been re-run on 0.5.6, and
+  it has no concurrency sweep, no sustained number and no rubric.
+- **The Dell C4130 (4x V100).** It joined the cluster as a worker on 2026-09-11,
+  configuration only. No model has been launched on it through AINode: its raw
+  vLLM container still sits outside the launch path, and AINode's node
+  announcement still reports 1 of its 4 GPUs.
+- **GLM-5.3-Flash at TP=2.** That Spark pair runs raw, outside AINode, so there is
+  no AINode-launched measurement for it.
+- **DeepSeek V4 and V4.1 Flash.** Neither has been launched through AINode or
+  benchmarked.
+- **Training, embeddings and quantization throughput.** Those features work and
+  are documented, but they have no bench records.
+
+## Run the bench yourself
+
+The bench is pure inference load against the OpenAI-compatible endpoint. It is
+non-destructive: it launches nothing, unloads nothing, and writes nothing on the
+node.
+
+<Info>
+`scripts/ainode-bench.py`, the harness that writes a schema record directly, is on
+its way and may not be on `main` when you read this. Check
+[`scripts/`](https://github.com/getainode/ainode/tree/main/scripts) in the product
+repo. `scripts/bench-serve.py` is there today and takes the same measurements.
+</Info>
+
+Intended shape, matching the record format in
+[`bench/SCHEMA.md`](https://github.com/getainode/ainode/blob/main/bench/SCHEMA.md):
+one JSON file per run, in `bench/results/`, named
+`<stamp>-<model-slug>-<label>.json`, where a run is one model on one placement
+(node, engine image, flags) on one day.
+
+```bash
+# One run: single-stream, a concurrency sweep, and the depth curve,
+# written out as a schema-1 record.
+python3 scripts/ainode-bench.py \
+    --url http://<node-ip>:3000 \
+    --model unsloth/Qwen3.8-27B-NVFP4 \
+    --label mtp-vision \
+    --out bench/results/
+```
+
+What is available on `main` right now:
+
+```bash
+# Single-stream TTFT + decode tok/s, then a concurrency sweep.
+python3 scripts/bench-serve.py \
+    --url http://<node-ip>:3000 \
+    --model unsloth/Qwen3.8-27B-NVFP4 \
+    --concurrency 1,2,4,8,16
+
+# The depth curve: what decode does as the KV cache fills.
+python3 scripts/bench-serve.py \
+    --url http://<node-ip>:3000 \
+    --model unsloth/Qwen3.8-27B-NVFP4 \
+    --mode depth --depths 4000,16000,32000,64000,128000 --reps 3
+```
+
+Two rules keep the numbers honest, and the harness enforces both. Token counts
+come from the server's own `usage` block, never from a local tokenizer estimate,
+so a bad chars-per-token guess cannot move a result. And every depth request
+carries a unique nonce at the **front** of the prompt, so `--enable-prefix-caching`
+cannot serve a cached prefill and make deep context look free.
+
+<Warning>
+Point the bench at the AINode API port (`:3000`), not at an engine's own port. Run
+it from a machine on the same network as the node, and do not run it against a
+node that is serving real traffic: a 16-stream sweep will contend with it.
+</Warning>
+
+## Submit a result
+
+We will take results on hardware we do not own. Open a pull request against
+[getainode/ainode](https://github.com/getainode/ainode) with:
+
+1. **One JSON file** in `bench/results/`, named
+   `<stamp>-<model-slug>-<label>.json`, matching
+   [`bench/SCHEMA.md`](https://github.com/getainode/ainode/blob/main/bench/SCHEMA.md).
+   Fill in `placement` completely: node, GPU, GPU count, TP degree, engine image,
+   AINode version, and the vLLM flags the engine actually ran with.
+2. **Nothing else edited by hand.** Run `python3 scripts/render-bench-table.py`
+   and commit the README change it makes. A test fails if the table and the JSON
+   disagree.
+3. **Omissions, not estimates.** Leave out any section you did not measure. A
+   missing key renders as "not measured", which is the answer we want. Filling it
+   with a plausible number is the one thing that will get a result rejected.
+4. **The rubric only if you ran it.** `rubric` is pass and total counts from a
+   correctness pass, not a self-assessment.
+
+If the model was served raw rather than launched through AINode, say so in `notes`
+and in the pull request. We would still like to see it, and we will label it as
+what it is.

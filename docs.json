@@ -65,6 +65,7 @@
             "pages": [
               "guides/chat",
               "guides/models",
+              "guides/tested-models",
               "guides/training",
               "guides/autodata",
               "guides/quantize",
