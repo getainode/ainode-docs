@@ -1,105 +1,161 @@
 ---
 title: "Distributed Inference"
-description: "Pool multiple GB10 nodes to serve frontier MoE models that don't fit on one node."
+description: "Launch one model across several GB10 nodes when it does not fit on one: how the mp shape works, what is measured, and what to check."
 icon: "network-wired"
 ---
 
-## When the cluster helps (and when it doesn't)
+## When the cluster helps (and when it does not)
 
-GB10 decode is **memory-bandwidth bound** (273 GB/s per node), not compute bound.
-That shapes what distribution buys you:
+GB10 decode is **memory-bandwidth bound**, not compute bound. That shapes what
+spreading a model across nodes buys you:
 
-- **Frontier MoE that can't fit one node** — the design point. A
-  Mixture-of-Experts model (e.g. **Qwen3.5-397B-A17B**) needs the cluster's pooled
-  memory for its *total* params but only reads its *active* params per token, so
-  single-stream decode stays fast (**~16–17 t/s** observed at TP=4 on a 4-node
-  cluster). MoE decouples capacity from decode cost — the right match for this
-  hardware.
-- **Batched multi-user throughput** and **fine-tuning / training** — also pay off.
+- **A model that does not fit one node.** Tensor parallelism pools the nodes'
+  memory. Every multi-node launch measured here is a Mixture-of-Experts model,
+  because an MoE needs the pooled memory for its total parameters but reads
+  only its active parameters per token, so decode stays usable:
+  - DeepSeek V4 Flash (284B / 13B active), 2x GB10 at TP=2: 34.5 tok/s
+    single-stream, 94.0 tok/s across 16 streams
+    (`20260916-033415-deepseek-v4-flash-dspark-fp8-tp2-mp.json`).
+  - Qwen3.8-Flash-Next NVFP4 (125B / 6B active), 2x GB10 at TP=2: 26.2 tok/s
+    single-stream, 207.6 tok/s across 16 streams
+    (`20260916-204216-qwen3_8-flash-next-nvfp4-tp2-mp-nightly.json`).
+  - Qwen3-235B-A22B NVFP4, 4x GB10 at TP=4: 16.5 tok/s single-stream
+    (`20260617-000000-qwen3-235b-a22b-nvfp4-tp4-frontier-moe.json`, measured on
+    AINode 0.4.x).
+- **Batched multi-user throughput** across nodes, through the federated master
+  (see [Federated Serving](/guides/federation)).
 
 <Warning>
-Multi-node tensor parallelism does **not** improve single-stream latency for
-**dense** models. It adds 2 all-reduces per layer over the fabric, and the comms
-tax eats the per-node bandwidth gain. A dense model that fits on one node should
-run **TP=1** — distributing it is slower, not faster. A dense 70B (NVFP4 ~35 GB)
-caps near ~7–8 t/s single-stream on **one** node; dense 405B is ~1 t/s. Reach for
-the cluster to gain *capacity*, not single-stream *latency*.
+Multi-node tensor parallelism does **not** make single-stream decode faster.
+Every layer adds all-reduces over the fabric, and the comms cost eats the
+per-node bandwidth gain. A model that fits on one node should run **TP=1**.
+Reach for the cluster to gain *capacity*, not single-stream *latency*. There is
+no measured number here for a dense 70B or 405B model, on one node or across
+several; the catalog's 405B entries have never been served.
 </Warning>
 
 ## How it works
 
-AINode uses Ray for cross-node orchestration and NCCL for GPU-to-GPU tensor
-communication, driving eugr's `launch-cluster.sh`. A distributed load is a
-`POST /api/cluster/load` with a `strategy` of `auto`, `tensor_parallel`, or
-`pipeline_parallel` (config `distributed_mode` is `solo` | `head` | `member`). The
-head node:
+A multi-node launch is **one `vllm serve` container per node**, using vLLM's
+own multi-node executor (the `mp` shape in `distributed_executor`):
 
-1. Discovers workers via UDP broadcast
-2. Starts a vLLM worker container on each peer
-3. Forms a Ray cluster
-4. Launches vLLM with `--tensor-parallel-size N`
+1. The head resolves the selected peers to their fabric IPs.
+2. Over SSH, the head starts an engine container on each peer with
+   `--node-rank k --headless`, and makes sure the peer has the weights and the
+   compiled-kernel cache it needs.
+3. The head starts its own engine container as rank 0 with
+   `--tensor-parallel-size N` and `--nnodes N`.
+4. All ranks rendezvous on `--master-addr <head fabric IP>` and `--master-port`
+   (29501, plus an offset for a stacked distributed instance), and the head's
+   engine serves on its API port.
 
-Each GPU holds `1/N` of the model weights (or its share of experts). All-reduce
-collectives run over NCCL.
+Each node holds `1/N` of the weights (or its share of the experts). All-reduce
+collectives run over NCCL; the NCCL library is whatever the engine image
+ships, and AINode sets its environment (`NCCL_SOCKET_IFNAME`,
+`GLOO_SOCKET_IFNAME`, `UCX_NET_DEVICES`, `NCCL_IB_HCA`) on every engine
+container from `cluster_interface` and the node's RDMA devices.
 
-### Flags the engine emits automatically
+There is no Ray cluster in this path and no external launcher script. Nothing
+is needed in the engine image beyond vLLM. A `"ray"` value of
+`distributed_executor` also exists in the code (a `ray start --head` container
+plus SSH-launched Ray workers), but it requires the `ray` CLI inside the
+engine image, and no image AINode ships or pins has one, so it is not a shape
+you can launch today. Both proven multi-node catalog recipes pin `mp`.
 
-You never hand-edit vLLM commands. For frontier MoE on this hardware AINode emits:
+Only **tensor parallelism** exists. The launch body accepts a `strategy` field
+for compatibility, and any launch spanning more than one node is tensor
+parallel; there is no pipeline parallelism.
 
-- `--tensor-parallel-size N`
-- `--kv-cache-dtype fp8` (required for long context)
-- `--enforce-eager` (Blackwell/ARM stability)
-- `--gpu-memory-utilization 0.85`
-- RoCE/RDMA NCCL environment per node
+### Flags the engine gets
 
-RoCE (RDMA) is **auto-detected** and preferred when ConnectX-7 hardware is present
-(up to ~200 Gbps); it is not required — nodes fall back to available transports and
-may run inbox or patched NCCL depending on driver state.
+You never hand-edit vLLM commands. The head builds the `vllm serve` argument
+list from the catalog recipe (`engine_image`, `extra_vllm_args`,
+`gpu_memory_utilization`, `kv_cache_dtype`, `max_model_len`) and the
+rendezvous flags above. Some notes on what that means in practice:
+
+- `--kv-cache-dtype` defaults to `fp8`, and is downgraded to `auto` for vision
+  models unless you ask for fp8 explicitly. A recipe can pin either.
+- `--enforce-eager` is added only when the instance runs the pinned default
+  engine image (`scitrera/dgx-spark-vllm:0.17.0-t5`), where it works around a
+  CUDA-graph fault on GB10. Recipes on `vllm/vllm-openai:v0.27.1` and later do
+  not get it: it disables CUDA graphs and costs throughput there.
+- `gpu_memory_utilization` comes from the recipe or the launch body. The code
+  default is 0.5; the installer writes 0.6 for the node's primary.
+- RoCE (RDMA) is used when the ConnectX-7 devices are visible: AINode maps
+  `/dev/infiniband` into the engine container and whitelists the node's HCAs.
+  Without them NCCL falls back to sockets over `cluster_interface`.
 
 ## Launch from the browser
 
-The launch form's **node picker** and **strategy pill** drive distributed loads.
-Before launch, the GUI shows a **sharding-plan preview** — `world_size`, TP / PP
-degree, and total memory required — so you can confirm the model fits the selected
-nodes. Node-targeted and GMU-guarded loads apply here too: distributed loads route
-through `POST /api/cluster/load` with the chosen `{node_id}`.
+The launch panel's **node toggles** drive multi-node launches. The head node
+is pinned; toggle the peer dots to add nodes. With more than one node
+selected, the browser posts one `POST /api/sharding/launch` with `model` and
+the chosen `node_ids`. A curated multi-node recipe (DeepSeek V4 Flash,
+Qwen3.8-Flash-Next) fills in the engine image, the flags and the `mp` shape, so
+the launch is one click. A node that is not an online member, or that
+broadcasts no fabric IP, is refused with 422 before anything starts.
 
-## Reference configuration (MoE)
+`GET /api/sharding/plan?model=<id>` previews what the launch would look like on
+the nodes available, and `GET /api/sharding/status` reports the distributed
+instances on this node.
 
-| Config | Total pooled memory | Model | Notes |
-|---|---|---|---|
-| 4× DGX Spark (TP=4) | ~487 GB | Qwen3.5-397B-A17B (MoE) | fp8 KV, `--enforce-eager`; ~16–17 t/s single-stream |
+The alternative is configuration: set `distributed_mode: "head"` and explicit
+fabric `peer_ips` in the head's `config.json`, then `sudo systemctl restart
+ainode`.
 
-## Critical: single NIC per cluster subnet
+<Note>
+A multi-node launch takes longer than a solo one. Peers may compile kernels on
+first launch, and the bind wait allows a launch that is still making progress
+up to 3600 s (`engine_bind_ceiling_seconds`). A distributed instance is not
+replayed automatically after a restart of the head; relaunch it.
+</Note>
 
-Each node must have exactly **one NIC with an IP on the cluster subnet**. Multiple
-NICs on the same subnet cause Ray placement group hangs with no error message.
+## Reference configurations (measured)
+
+| Config | Aggregated memory (UI sum) | Model | Single-stream | 16 streams | Record |
+|---|---|---|---|---|---|
+| 2x GB10 (TP=2, mp) | about 244 GB | DeepSeek V4 Flash (DSpark, FP8) | 34.5 tok/s | 94.0 tok/s | `20260916-033415-deepseek-v4-flash-dspark-fp8-tp2-mp.json` |
+| 2x GB10 (TP=2, mp) | about 244 GB | Qwen3.8-Flash-Next NVFP4 | 26.2 tok/s | 207.6 tok/s | `20260916-204216-qwen3_8-flash-next-nvfp4-tp2-mp-nightly.json` |
+| 4x GB10 (TP=4) | about 487 GB | Qwen3-235B-A22B NVFP4 | 16.5 tok/s | not measured | `20260617-000000-qwen3-235b-a22b-nvfp4-tp4-frontier-moe.json` |
+
+The TP=4 row predates 0.5.x and has not been re-run through the current launch
+path. Qwen3.5-397B-A17B is in the catalog but has never been served.
+
+## One fabric NIC per node
+
+Each node should have exactly **one NIC with an IP on the cluster subnet**, and
+`cluster_interface` in `config.json` should name it. AINode pins
+`NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` to that interface on the engine
+container, so a second NIC on the same subnet is an ambiguity you do not want
+at rendezvous time.
 
 ```bash
-# Verify — should show exactly one IP on your cluster subnet
+# Verify: should show exactly one IP on your cluster subnet
 ip addr | grep "10.0.0\|192.168.0"
 ```
 
 ## NCCL transport verification
 
-After launching a distributed job, check vLLM worker logs. The exact log strings
-depend on the transport NCCL selects on your fabric — verify against your own
-launch rather than trusting these literally:
+After launching a distributed model, check the engine log. As of the current
+release `ainode logs` follows the log the configured backend writes
+(`nvidia-distributed.log` on a distributed head) and prints which file it is
+tailing. The exact log strings depend on the transport NCCL selects on your
+fabric; verify against your own launch rather than trusting these literally:
 
 ```bash
 ainode logs -f | grep "Using network"
 # Good:  a RoCE/IB transport line naming your NIC + link speed
-# Bad:   "Using network Socket"  ← much slower, check ConnectX-7 cabling
+# Bad:   "Using network Socket", much slower; check the ConnectX-7 cabling
 ```
 
 ## GPU Direct RDMA (optional, advanced)
 
-Optional speedup, and dependent on the host driver state on your fleet:
+An optional speedup that depends on the host driver state:
 
 ```bash
-# Load peermem module on each host (not in container)
+# Load the peermem module on each host (not in the container)
 sudo modprobe nvidia-peermem
 
-# Verify NCCL picks it up on next launch
+# Verify NCCL picks it up on the next launch
 ainode logs -f | grep "GPU Direct RDMA"
 ```

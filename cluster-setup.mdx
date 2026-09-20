@@ -1,77 +1,109 @@
 ---
 title: "Cluster Setup"
-description: "Connect multiple GB10 nodes into a single AI cluster with 487+ GB VRAM."
+description: "Connect several GB10 nodes into one cluster: federated serving, plus one model across nodes when it does not fit on one."
 ---
 
 ## Overview
 
-AINode discovers peers automatically via UDP broadcast on port 5679. The primary multi-node mode is a **federated master**: each node serves its own model(s) solo, and the master routes `/v1/*` requests to the node holding the requested model. You load and unload any model on any node from the master UI.
+AINode discovers peers automatically over UDP broadcast on the discovery port in
+`config.json` (the installer writes 5679). The primary multi-node mode is a
+**federated master**: each node serves its own model(s) solo, and the master
+routes `/v1/*` requests to the node holding the requested model. You load and
+unload any model on any node from the master UI.
 
-The master can also **shard one frontier model across all GPUs** using tensor-parallel inference over NCCL — but that is specifically for a **frontier MoE model that won't fit on a single node**. A model that fits on one node should run **TP=1**: cross-node tensor parallelism adds two all-reduces per layer over the fabric and does **not** speed up single-stream decode (it eats the per-node bandwidth gain).
+The master can also **launch one model across several nodes** with tensor
+parallelism over NCCL. That is for a model that does not fit on a single node,
+in practice a large MoE. A model that fits on one node should run TP=1:
+cross-node tensor parallelism adds all-reduces over the fabric on every layer
+and does not make single-stream decode faster.
 
-**Verified: 4× GB10 nodes (3× DGX Spark + 1× ASUS GX10), 487 GB aggregated VRAM, NCCL over RoCE at 200 Gbps.**
+**Measured through AINode's launch path:** four GB10 nodes (3x DGX Spark + 1x
+ASUS GX10) as a federated fleet, TP=2 pairs, and one TP=4 launch. The records
+are on [Tested Models](/guides/tested-models).
 
 ## Step 1: Install on each node
 
 ```bash
-# Master node
-curl -fsSL https://ainode.dev/install | bash -s -- --job master
+# Master node (AINODE_PEERS bootstraps SSH to the peers; give their fabric addresses)
+AINODE_PEERS="10.0.0.2,10.0.0.3" curl -fsSL https://ainode.dev/install | bash -s -- --job master
 
 # Each worker node
 curl -fsSL https://ainode.dev/install | bash -s -- --job worker
 ```
 
+Every node should run the same AINode release. Without `-s -- --job master`,
+`AINODE_PEERS` gives you a solo node with SSH keys copied and nothing else.
+
 ## Step 2: Open the cluster UI
 
-Navigate to `http://<master-ip>:3000` → **Cluster** tab. Nodes appear automatically as they start broadcasting.
+Navigate to `http://<master-ip>:3000` and open the **Cluster** tab. Nodes
+appear as they start broadcasting.
 
-## Step 3: Load a model (federated) or launch a sharded model
+## Step 3: Load a model on one node, or launch one across several
 
-From the launch form:
+From the launch panel:
 
 1. Pick the model (catalog entry or Hugging Face repo ID).
-2. Use the **per-node picker** to choose where it runs — the head node is pinned with a star; toggle the peer dots to target specific nodes. (This replaced the old count-based "Minimum Nodes" selector in 0.4.14.)
-3. Set **`gpu_memory_utilization`** in the per-load input (required for a stacked 2nd+ load on a node).
+2. Use the **node toggles** to choose where it runs. The head node is pinned;
+   toggle the peer dots to add nodes.
+3. Set **`gpu_memory_utilization`** in the per-load input (required for a
+   stacked second load on a node).
 4. Launch.
 
-A node-targeted load POSTs explicit `node_ids` and routes through `/api/cluster/load` with the chosen `node_id`. For a frontier MoE model that needs the pooled memory of several nodes, select multiple nodes — the master SSHes into each peer, forms a Ray cluster, and starts vLLM with `--tensor-parallel-size N`.
+With one node selected, the browser posts `POST /api/cluster/load` with that
+`node_id`, and the master forwards the call over the fabric to the node's own
+`/api/models/load`. With several nodes selected, it posts one
+`POST /api/sharding/launch` with the chosen `node_ids`. The head is always this
+node; the other nodes are resolved to their fabric IPs (a node with no known
+fabric IP is refused with 422). A curated multi-node catalog recipe supplies the
+engine image, the vLLM flags and the executor shape, so the launch is one
+click. The mechanism is described on [Distributed Inference](/guides/distributed).
+
+The alternative to the UI is `distributed_mode: "head"` plus explicit `peer_ips`
+in the head's `config.json`, then `sudo systemctl restart ainode`.
 
 ## Network requirements
 
 | Requirement | Why |
 |---|---|
-| Passwordless SSH between nodes | eugr's launcher SSHes into each peer |
-| One NIC per cluster subnet | Multi-NIC routing ambiguity causes NCCL hangs |
-| UDP port 5679 open on cluster subnet | Peer discovery |
-| TCP ports 6379, 10001–10009, 29500 | Ray + NCCL rendezvous |
+| Passwordless SSH from the head to each peer | The head SSHes into each peer to start that peer's engine container |
+| A fabric NIC per node, named in `cluster_interface` | AINode sets `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `UCX_NET_DEVICES` and `NCCL_IB_HCA` on the engine container from it |
+| UDP discovery port (installer default 5679) open on the cluster subnet | Peer discovery |
+| TCP 29501 (plus an offset per stacked instance) between nodes | The multi-node rendezvous port (`--master-port`); the engine containers run with host networking |
 
 <Warning>
-Use the direct fabric NIC (ConnectX-7 / `enP2p1s0f1np1`) for NCCL, not Tailscale. Tailscale adds ~2ms RTT which degrades throughput significantly.
+Use the direct fabric NIC (ConnectX-7 / `enP2p1s0f1np1`) for NCCL, not
+Tailscale. Tailscale adds milliseconds of RTT on every collective.
 </Warning>
 
-## VRAM reference
+## Memory reference
 
-GB10 decode is memory-bandwidth bound, so the cluster pays off on **frontier MoE** models (which read only their active params per token) — not on stretching a dense model across nodes.
+GB10 decode is memory-bandwidth bound, so the cluster pays off on **MoE** models
+(which read only their active parameters per token), on batched multi-user
+throughput, and on capacity, not on making a dense model decode faster.
 
-| Nodes | Aggregated VRAM | Design-point workload |
+| Nodes | Aggregated memory (UI sum) | Measured here |
 |---|---|---|
-| 1× GB10 | ~122 GB usable (128 GB unified) | Dense ≤32B, or an A3B-class MoE, TP=1 |
-| 2× GB10 | ~244 GB | Larger MoE, or capacity for stacked models |
-| 4× GB10 | ~487 GB | Frontier MoE (e.g. Qwen3.5-235B-A22B / 397B-A17B) sharded TP=4 |
+| 1x GB10 | about 122 GB usable (128 GB unified) | Dense up to 27B and A3B-class MoE at TP=1, stacked two per node |
+| 2x GB10 | about 244 GB | DeepSeek V4 Flash at TP=2: 34.5 tok/s single-stream, 94.0 tok/s at 16 streams (`20260916-033415-deepseek-v4-flash-dspark-fp8-tp2-mp.json`); Qwen3.8-Flash-Next at TP=2: 26.2 / 207.6 tok/s (`20260916-204216-qwen3_8-flash-next-nvfp4-tp2-mp-nightly.json`) |
+| 4x GB10 | about 487 GB | Qwen3-235B-A22B NVFP4 at TP=4: 16.5 tok/s single-stream (`20260617-000000-qwen3-235b-a22b-nvfp4-tp4-frontier-moe.json`, measured on 0.4.x) |
 
-<Note>
-Dense 70B/405B "largest model" framing is a poor fit for this hardware: dense 70B
-caps near ~7–8 t/s single-stream and dense 405B ~1 t/s. The MoE models above stay
-fast (~16–17 t/s single-stream at TP=4) because decode only reads active params.
-</Note>
+Every number above cites its record under
+[`bench/results/`](https://github.com/getainode/ainode/tree/main/bench/results).
+There is no measured number for a dense 70B or 405B model on this hardware.
 
 ## Troubleshooting
 
-**Ray placement group hangs indefinitely**  
-More than one NIC has an IP on the cluster subnet. Remove the extra IP or set `NCCL_SOCKET_IFNAME` explicitly in the cluster config.
-
 **NCCL using socket transport instead of RoCE**  
-Check with `ainode logs -f | grep "Using network"`. Should say `NET/IB RoCE`. If it says `Socket`, the mlx5 driver isn't loaded or the ConnectX-7 isn't on the cluster fabric.
+Check with `ainode logs -f | grep "Using network"` (as of the current release
+`ainode logs` follows the log the configured backend writes, and prints which
+file). It should name an IB/RoCE transport. If it says `Socket`, the mlx5
+driver is not loaded or the ConnectX-7 port is not on the cluster fabric.
+
+**A multi-node launch is refused with 422**  
+A selected node is not an online member, or it broadcasts no fabric IP. Set
+`cluster_interface` in that node's `config.json` and restart it.
 
 **Workers not appearing in topology**  
-Confirm UDP port 5679 is open. All nodes must be on the same broadcast domain (same L2 subnet).
+Confirm the discovery port is open. All nodes must be on the same broadcast
+domain (same L2 subnet) and share the same `cluster_id`.

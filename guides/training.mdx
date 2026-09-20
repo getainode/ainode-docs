@@ -8,32 +8,67 @@ icon: "brain"
 
 | Method | Memory | When to use |
 |---|---|---|
-| **LoRA** | Low — bf16 base + adapters | Most fine-tunes |
-| **QLoRA** | Lowest — 4-bit NF4 base + adapters | Large models on memory-constrained nodes |
-| **Full** | High — all weights updated | Best quality, 128+ GB VRAM |
+| **LoRA** | Low: bf16 base + adapters | Most fine-tunes |
+| **QLoRA** | Lowest: 4-bit NF4 base + adapters | Large models on memory-constrained nodes |
+| **Full** | High: all weights updated | Best quality, needs the whole model plus optimizer state in one node's memory |
+
+Every run is **single node, on that node's own GPU**. There is no multi-node
+(DDP) training and no DPO / preference training: both templates were removed
+because neither had a working implementation behind it, and they come back
+only together with one.
 
 ## How training runs
 
-On the shipped image, the orchestrator container is intentionally **slim** — it
-carries no `torch` / `peft` / `datasets`. So when you submit a LoRA, QLoRA, or full
-job (and adapter **merge**), AINode **spawns a GPU container** (quant-image based)
-to run it: your model store is mounted read-write, datasets read-only, the runner
-and container config are staged into the job dir, and `peft` is pip-shimmed at
-launch. Cancelling a job tears down the actual container.
+The orchestrator container is intentionally **slim** (no `torch`, `peft` or
+`datasets`). When you submit a LoRA, QLoRA or full job (or an adapter
+**merge**), AINode **spawns a GPU container** to run it: your model store is
+mounted read-write, datasets read-only, the runner and container config are
+staged into the job dir, and `peft` is pip-shimmed at launch. Cancelling a job
+tears down the container.
 
-<Note>
-Distributed **(DDP)** training runs in host mode, not a spawned container.
-</Note>
+<Warning>
+**The training image is built locally.** Training, merge and quantization jobs
+run in `ainode-quant:0.17.0-t5`, built from `scripts/Dockerfile.quant` in the
+product repo. CI does not build it and no registry carries it, so a node has to
+build it once before its first job (on an aarch64 GB10, where the base engine
+image is already pulled):
+
+```bash
+git clone https://github.com/getainode/ainode && cd ainode
+docker build -f scripts/Dockerfile.quant -t ainode-quant:0.17.0-t5 .
+```
+
+AINode checks for the image before every spawned container and fails the
+submit with that build command when it is missing, instead of a bare docker
+error in the job log. `AINODE_TRAIN_IMAGE` / `AINODE_QUANT_IMAGE` point it at an
+image the node already has.
+</Warning>
+
+### What a run does on a GB10
+
+- The model is loaded with `attn_implementation: "eager"` by default. The
+  training image's memory-efficient SDPA kernels are built for sm80 to sm100,
+  and GB10 is sm121, so on this hardware SDPA returns zeros forward and NaN
+  backward without raising. `"auto"` hands the choice back to transformers if
+  you are on a GPU where SDPA works.
+- Padding is dynamic per batch, and labels are masked to `-100` on padded
+  positions, so the loss is over your text and not over pad tokens.
+- Two gates fail the job rather than report success: a non-finite loss or
+  gradient norm aborts the run with `AINODE_ERROR:NAN_LOSS` and saves nothing,
+  and every saved `*.safetensors` is scanned for non-finite values
+  (`AINODE_ERROR:NAN_WEIGHTS`).
+- The first 20 steps are logged one by one, then at the configured cadence, so
+  the loss chart in the browser is real where it matters.
 
 ## Workflow
 
 ### 1. Add a dataset
 
-AINode has a **Dataset Manager** (the **Datasets** tab in the Training view). You
-can:
+AINode has a **Dataset Manager** (the **Datasets** tab in the Training view).
+You can:
 
-- **Upload** local files — JSONL, JSON, or CSV (`POST /api/datasets/upload`).
-  Field schemas are auto-detected:
+- **Upload** local files: JSONL, JSON, or CSV (`POST /api/datasets/upload`).
+  The runner accepts these row shapes:
 
   ```jsonl
   {"text": "full training text"}
@@ -48,24 +83,25 @@ can:
 You can also reference a Hugging Face dataset by ID (`tatsu-lab/alpaca`).
 
 <Note>
-Datasets produced by **AutoData** register automatically with the Dataset Manager,
-so the returned `dataset_id` drops straight into a training run.
+Datasets produced by **AutoData** register with the Dataset Manager and get a
+`dataset_id`, but AutoData writes ShareGPT rows (`{"conversations": [...]}`),
+which the training runner does not tokenize yet. Convert them to one of the
+three shapes above before training on them.
 </Note>
 
 ### 2. Launch the wizard
 
-**Training** tab → **New Training Run** → 5-step wizard:
-Model → Dataset → Method → Distribution → Review
+**Training** tab, then **New Training Run**, a 5-step wizard:
+Base Model, Dataset, Method, Run Name, Review.
 
-The wizard submits **canonical Hugging Face repo ids** (`org/name`). When you train
-an on-disk model, the container builder maps its on-disk reference (an `org--name`
-slug) to the right mount for you — you no longer have to worry that a disk slug
-gets rejected by Hugging Face.
+The wizard submits **canonical Hugging Face repo ids** (`org/name`). When you
+train an on-disk model, the container builder maps its on-disk reference (an
+`org--name` slug) to the right mount for you.
 
 ### 3. Monitor progress
 
-Live loss chart, progress bar, log tail. Cancel anytime — saves the last
-checkpoint and tears down the training container.
+Live loss chart, progress bar, log tail. Cancel anytime; the container is torn
+down.
 
 ### 4. Retrieve artifacts
 
@@ -77,13 +113,16 @@ checkpoint and tears down the training container.
 ### 5. Merge LoRA (optional)
 
 Click **Merge Adapter** to merge LoRA weights into the base model via
-`PEFT.merge_and_unload()`. The merged model can be loaded directly into vLLM. (This
+`PEFT.merge_and_unload()`. The merged model can be loaded into vLLM. (This
 action is state-gated and runs in the spawned GPU container.)
 
-### 6. Resume from checkpoint
-
-If a run fails or is cancelled, click **Resume** — AINode finds the latest
-checkpoint and continues.
+<Note>
+**Resume from checkpoint** (`POST /api/training/jobs/{id}/resume`) exists in
+the API but does not work in the shipped container mode: the resumed job is
+given the orchestrator's checkpoint path and the source job's directory is not
+mounted into the new container, so the run fails with "Can't find a valid
+checkpoint". Treat a failed or cancelled run as something to start over.
+</Note>
 
 ## Configuration
 
@@ -93,12 +132,13 @@ checkpoint and continues.
 | `batch_size` | 4 | Reduce if OOM |
 | `learning_rate` | 2e-4 | Use 5e-5 for full fine-tune |
 | `lora_rank` | 16 | Higher = more capacity, more VRAM |
-| `max_seq_length` | 2048 | |
+| `max_seq_length` | 2048 | Sequences are truncated to this; padding is per batch |
 | `eval_split` | 0.1 | 0 to disable evaluation |
-| `use_gradient_checkpointing` | false | Saves VRAM at cost of speed |
-| `wandb_project` | — | Enable W&B logging |
+| `use_gradient_checkpointing` | false | Saves VRAM at the cost of speed |
+| `attn_implementation` | `eager` | `auto` lets transformers pick (SDPA); keep `eager` on GB10 |
+| `wandb_project` | (unset) | Enable W&B logging |
 
-Click **★ Smart Defaults** in the wizard to auto-fill based on your model and
+Click **Smart Defaults** in the wizard to auto-fill based on your model and
 method.
 
 ## Gated models (Llama, Gemma)
@@ -107,9 +147,11 @@ method.
 ainode config --hf-token hf_xxxxxxxxxxxxxxxx
 ```
 
-No restart is needed for training — the submit handler reads `hf_token` live from
-the node config at job-submit time and propagates it automatically to every
-training job. (A restart is only relevant for engine/serving, not training.)
+No restart is needed for training: the submit handler reads `hf_token` live
+from the node config at job-submit time and passes it to the job container
+through a mode-0600 env file that is removed when the container exits. The
+token is never written into a job config or a job log, and the job status API
+masks it. (A restart is only relevant for engine/serving, not training.)
 
 ## API
 
@@ -129,17 +171,20 @@ curl -O http://localhost:3000/api/training/jobs/{job_id}/output/adapter_model.sa
 
 # Merge LoRA into base
 curl -X POST http://localhost:3000/api/training/jobs/{job_id}/merge
-
-# Resume from checkpoint
-curl -X POST http://localhost:3000/api/training/jobs/{job_id}/resume
 ```
+
+The full endpoint list, including datasets, is on the
+[Training API](/api-reference/training) page.
 
 ## Troubleshooting
 
-**CUDA out of memory** — Lower `batch_size` to 1–2, enable
+**Submit answers 400 naming `ainode-quant:0.17.0-t5`**: the node has not built
+the training image. Build it with the command above.
+
+**CUDA out of memory**: lower `batch_size` to 1 or 2, enable
 `use_gradient_checkpointing`, or switch to QLoRA.
 
-**DDP hangs** — Ensure `MASTER_ADDR` is set and reachable on the cluster fabric.
-Don't use Tailscale IPs for NCCL.
+**`AINODE_ERROR:NAN_LOSS` at step 1**: the attention implementation is
+producing NaN on this GPU. Leave `attn_implementation` at `eager` on GB10.
 
-**401 from Hugging Face** — Run `ainode config --hf-token hf_xxx`.
+**401 from Hugging Face**: run `ainode config --hf-token hf_xxx`.

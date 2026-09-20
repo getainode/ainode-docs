@@ -1,26 +1,27 @@
 ---
 title: "Federated Serving"
-description: "One master routes each request to whichever node holds the requested model — load and unload any model on any node from the browser."
+description: "One master routes each request to whichever node holds the requested model. Load and unload any model on any node from the browser."
 icon: "sitemap"
 ---
 
-A cluster doesn't have to shard one giant model across every node. With
+A cluster does not have to run one giant model across every node. With
 **federation**, each node serves its own model(s), and the **master** routes each
-`/v1/*` request to the node currently serving the requested model — a single
-OpenAI-compatible endpoint in front of the whole fleet.
+`/v1/*` request to the node currently serving the requested model: a single
+OpenAI-compatible endpoint, on port 3000, in front of the whole fleet.
 
 <Note>
 Federation (one endpoint, many models, routed by name) is distinct from
-**distributed tensor-parallel** (one model sharded across nodes — see
+**distributed tensor-parallel** (one model across several nodes, see
 [Distributed Inference](/guides/distributed)). Use federation to serve many models
 across a fleet; use TP to serve one model too big for a single node.
 </Note>
 
 ## How routing works
 
-The master builds a routing table from live cluster broadcast state — every node
+The master builds a routing table from live cluster broadcast state: every node
 advertises its primary model and any stacked instances it heads. When a `/v1/*`
-request arrives:
+request arrives (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
+`/v1/messages`, `/v1/decide`):
 
 1. The master reads the `model` field of the request body.
 2. It collects **every** node currently serving that model (local node first, then
@@ -29,8 +30,8 @@ request arrives:
    mid-swap, crashed, or otherwise unreachable.
 
 Failover is what makes routing robust: a crashed node is indistinguishable from a
-live one in cluster state, so the master uses a fast connect-timeout (5s) and moves
-on to the next candidate rather than hanging the request.
+live one in cluster state, so the master uses a short connect timeout (5 s) and
+moves on to the next candidate rather than hanging the request.
 
 - If **no node** serves the requested model, the master returns `404`
   (`model_not_found`).
@@ -43,42 +44,46 @@ set `model` to the exact id (or a `served_model_name` alias) you loaded.
 ## Model stacking is routed too
 
 A single node can hold **more than one model at a time**. Each stacked instance gets
-its own port (`8001`, `8002`, …) and its own `served_model_name` alias(es). The
-router treats stacked instances as first-class routing targets — a co-resident
+its own port (`8001`, `8002`, ...) and its own `served_model_name` alias(es). The
+router treats stacked instances as first-class routing targets: a co-resident
 second model on a node lives at `:8001`, not the node's primary `:8000`, and the
-master routes to it by name.
+master routes to it by name. An embedding model is a stacked instance like any
+other (a vLLM engine with `--runner pooling`), and `POST /v1/embeddings` routes to
+it by model id the same way.
 
-Stacked instances **persist across restarts** — AINode replays them on boot so your
-fleet comes back exactly as you left it — and loads are **serialized** so two models
-never race for the same memory. A specific stacked instance is also reachable
-directly on its own port.
+Stacked instances **persist across restarts** (AINode replays them on boot so your
+fleet comes back as you left it) and loads are **serialized** so two models never
+race for the same memory. A specific stacked instance is also reachable directly
+on its own port.
 
 <Tip>
-Since 0.5.1, `GET /api/nodes` carries a per-node `instances[]` list (primary +
-every stacked model with its port and status), and the dashboard renders a
-**STACKED** sub-card per instance with its own **Unload** control — the same source
-the router uses, so the views and routing always agree.
+`GET /api/nodes` carries a per-node `instances[]` list (primary + every stacked
+model with its port and status), and the dashboard renders a **STACKED** sub-card
+per instance with its own **Unload** control. It is the same source the router
+uses, so the views and routing always agree.
 </Tip>
 
 ## Load or unload any node from the browser
 
-You manage the whole fleet from one browser tab — no SSH. `POST /api/cluster/load`
+You manage the whole fleet from one browser tab, with no SSH. `POST /api/cluster/load`
 and `POST /api/cluster/unload` take a `{node_id, model}` and the master **forwards
 the call over the fabric** to that node's local `/api/models/load` / `unload`
-endpoint. The master never SSHes into a peer; it reuses each node's own model API.
+endpoint. For a single-node load the master never SSHes into a peer; it reuses
+each node's own model API. (A multi-node launch is the one place SSH is used: the
+head starts each peer's engine container over SSH.)
 
 ```bash
 # Load a model on a specific node
 curl -X POST http://localhost:3000/api/cluster/load \
   -H 'Content-Type: application/json' \
-  -d '{"node_id": "spark-2", "model": "Qwen/Qwen3-9B-AWQ", "gpu_memory_utilization": 0.4}'
+  -d '{"node_id": "spark-2", "model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4", "gpu_memory_utilization": 0.3}'
 
 # Unload it later
 curl -X POST http://localhost:3000/api/cluster/unload \
   -H 'Content-Type: application/json' \
-  -d '{"node_id": "spark-2", "model": "Qwen/Qwen3-9B-AWQ"}'
+  -d '{"node_id": "spark-2", "model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4"}'
 
-# See the fleet — nodes, primary models, and stacked instances[]
+# See the fleet: nodes, primary models, and stacked instances[]
 curl http://localhost:3000/api/nodes
 
 # The federated model catalog (union across all nodes)
@@ -87,19 +92,21 @@ curl http://localhost:3000/v1/models
 
 <Warning>
 A second-or-later model on a node **must** specify `gpu_memory_utilization`
-explicitly (the node default could push total reservation past capacity and hard-
-crash a GB10 — unified memory). The admission guard rejects a stacked load whose
-projected node total would exceed the `0.90` cap, and it runs **before** the live
-instance is touched. See [Troubleshooting → Stacked loads](/troubleshooting).
+explicitly (the node default could push total reservation past capacity and
+hard-crash a GB10, whose memory is unified with the host). The admission guard
+rejects a stacked load whose projected node total would exceed the `0.90` cap,
+and it runs **before** the live instance is touched. The primary's own
+reservation counts: the installer writes `0.6` for it. See
+[Troubleshooting: Stacked loads](/troubleshooting).
 </Warning>
 
 ## Per-node memory headroom
 
 Each node exposes a **memory-utilization** knob so you can leave room for a second
-stacked model or for a quantization job (which needs the node's full unified memory
-— see [Quantize a Model](/guides/quantize)). Set `gpu_memory_utilization` on the
-load request; the launch form surfaces it as an input and validates it on
-distributed loads too.
+stacked model or for a quantization job (which needs the node's full unified
+memory; see [Quantize a Model](/guides/quantize)). Set `gpu_memory_utilization` on
+the load request; the launch panel surfaces it as an input and validates it on
+multi-node launches too.
 
 ## Send a request through the master
 
@@ -109,16 +116,11 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:3000/v1", api_key="not-needed")
 
 resp = client.chat.completions.create(
-    model="Qwen/Qwen3-9B-AWQ",   # routed to whichever node serves it
+    model="ornith-ai/Ornith-1.5-35B-A3B-NVFP4",   # routed to whichever node serves it
     messages=[{"role": "user", "content": "Hello from the fleet"}],
 )
 print(resp.choices[0].message.content)
 ```
 
 The master resolves `model` to the serving node, streams the response back, and
-records the request against fleet metrics — all transparent to the client.
-
-<Info>
-Federated routing, `/api/nodes` `instances[]`, and the STACKED dashboard sub-cards
-are all live as of **0.5.2**. If your fleet predates them, run `ainode update`.
-</Info>
+records the request against fleet metrics, all transparent to the client.

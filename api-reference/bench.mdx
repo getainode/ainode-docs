@@ -1,0 +1,58 @@
+---
+title: "Bench API"
+description: "Run the AINode speed benchmark against a model loaded on the fleet, from the browser or over REST, and read the records back."
+---
+
+The Bench view runs the same measurement code as `scripts/ainode-bench.py` in
+the product repo, against a model already loaded on the fleet. It is
+non-destructive: it launches nothing, unloads nothing, and writes nothing on
+the node except the run record. The record format is the schema-1 file
+described on [Tested Models](/guides/tested-models).
+
+## Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/bench/runs` | Start a benchmark run on this node |
+| GET | `/api/bench/runs` | List runs, newest first, live and on disk |
+| GET | `/api/bench/runs/{run_id}` | One run with its status, progress, log tail and result |
+| POST | `/api/bench/runs/{run_id}/cancel` | Cancel a running benchmark |
+| DELETE | `/api/bench/runs/{run_id}` | Delete a run and its record |
+| GET | `/api/bench/results/{run_id}.json` | Download the raw record, the same JSON shape as `bench/results/` in the product repo |
+| GET | `/api/bench/sections` | The sections the run form can tick: `single`, `prefill`, `sustained`, `concurrency`, `reasoning` |
+| GET | `/api/bench/report` | Every local record rendered as one report |
+
+## Start a run
+
+```bash
+curl -X POST http://localhost:3000/api/bench/runs \
+  -H "Content-Type: application/json" \
+  -d '{"model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4", "label": "stacked-on-spark-1"}'
+```
+
+- `model` is required and must be served by a live engine: the readiness check
+  is a live `/v1/models` probe of the engine, not a status latch.
+- `sections` picks a subset of the five speed sections; omitted, all run.
+  `depths` (default 4000, 16000, 32000, 64000, 120000) and `streams` (default
+  1, 2, 4, 8, 16) set the sweep points; `no_think` sets
+  `enable_thinking=false` for every section except reasoning. `label` names
+  the record.
+- One run at a time per node: a second request answers **409** with the
+  running id, because two benchmarks against one engine measure each other's
+  queue.
+- A busy node is a warning in the record, not a refusal.
+
+The harness, agentic, decide and embed benches are terminal subcommands of
+`scripts/ainode-bench.py`, not browser runs.
+
+<Warning>
+A 16-stream sweep contends with real traffic on the node it runs against. Do
+not bench a node that is serving users.
+</Warning>
+
+## Submit a record
+
+A record downloaded from `/api/bench/results/{run_id}.json` is a schema-1
+record. To have it listed on [Tested Models](/guides/tested-models), commit it
+under `bench/results/` in a pull request against
+[getainode/ainode](https://github.com/getainode/ainode), as described there.

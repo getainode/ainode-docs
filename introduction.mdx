@@ -1,6 +1,6 @@
 ---
 title: "What is AINode?"
-description: "Turn any NVIDIA GPU into a complete local AI platform."
+description: "Turn an NVIDIA GPU machine into a local AI platform: chat, an OpenAI-compatible API, fine-tuning, and multi-node serving."
 ---
 
 <img
@@ -10,7 +10,7 @@ description: "Turn any NVIDIA GPU into a complete local AI platform."
   style={{ margin: "0 auto 2rem", display: "block" }}
 />
 
-AINode is a free, open-source platform that turns any NVIDIA GPU machine into a complete local AI stack — browser chat UI, OpenAI-compatible API, LoRA fine-tuning, and a federated multi-node master that routes requests across nodes (or shards a frontier MoE model across GPUs over NCCL).
+AINode is a free, open-source platform that turns an NVIDIA GPU machine into a local AI stack: a browser chat UI, an OpenAI-compatible API, LoRA fine-tuning, and a federated multi-node master that routes each request to the node serving the requested model, or launches one model across several nodes with tensor parallelism over NCCL.
 
 **One command to install. No cloud. No monthly bill.**
 
@@ -27,140 +27,107 @@ curl -fsSL https://ainode.dev/install | bash
     Browser-based streaming chat on port 3000. Works with any loaded model.
   </Card>
   <Card title="OpenAI-compatible API" icon="code" href="/api-reference/chat">
-    Drop-in `/v1` endpoints on port 8000. Works with LangChain, Open WebUI, and any OpenAI client.
+    `/v1` endpoints on port 3000, routed across the fleet. Works with LangChain, Open WebUI, and any OpenAI client.
   </Card>
   <Card title="Model downloads" icon="download" href="/guides/models">
-    50+ models from the built-in catalog. Paste any Hugging Face repo ID.
+    26 catalog entries with launch recipes, or paste any Hugging Face repo ID.
   </Card>
   <Card title="Fine-tuning" icon="brain" href="/guides/training">
-    LoRA, QLoRA, and full fine-tune from the browser. No notebooks.
+    LoRA, QLoRA, and full fine-tune from the browser, single node, in a spawned GPU container.
   </Card>
   <Card title="Multi-node clustering" icon="server" href="/guides/distributed">
-    Automatic peer discovery. The master routes requests to the node serving each model — or shards a frontier MoE model across GPUs.
+    Nodes discover each other over UDP. The master routes requests to the node serving each model, or launches one model across several nodes.
   </Card>
   <Card title="Prometheus metrics" icon="chart-line" href="/api-reference/metrics">
-    `/metrics` endpoint for Grafana, Prometheus, VictoriaMetrics.
+    `/metrics` on port 3000 for Grafana, Prometheus, VictoriaMetrics.
   </Card>
 </CardGroup>
 
 ---
 
-## Verified hardware
+## Hardware
 
-### GB10 Grace Blackwell systems (unified memory, cluster-native)
+### Proven, with a record
 
-| Hardware | Manufacturer | GPU memory | Price | Status |
+Every row below has at least one run committed under
+[`bench/results/`](https://github.com/getainode/ainode/tree/main/bench/results)
+in the product repo, launched through AINode's own launch path. The full
+tables are on [Tested Models](/guides/tested-models).
+
+| Hardware | GPU | Memory | What ran | Record |
 |---|---|---|---|---|
-| DGX Spark | NVIDIA | 128 GB unified (~122 GB usable) | $3,999 | ✅ Verified — TP=4, 487 GB cluster |
-| Ascent GX10 | ASUS | 128 GB unified | $2,999 | ✅ Verified |
-| Pro Max with GB10 (FCM1253) | Dell | 128 GB unified | TBD | ✅ Supported |
-| ZGX Nano AI Station | HP | 128 GB unified | TBD | ✅ Supported |
+| NVIDIA DGX Spark | GB10 | 128 GB unified (about 122 GB usable) | Solo, stacked, and TP=2 / TP=4 multi-node serving | `20260913-130400-ornith-1_5-35b-a3b-nvfp4-text-only-mtp.json`, `20260916-033415-deepseek-v4-flash-dspark-fp8-tp2-mp.json`, `20260617-000000-qwen3-235b-a22b-nvfp4-tp4-frontier-moe.json` |
+| ASUS Ascent GX10 | GB10 | 128 GB unified | Solo and stacked serving, embeddings | `20260813-000000-nvidia-nemotron-3_5-lightning-30b-a3b-nvfp4-dspark-recipe.json`, `20260919-220011-qwen3-embedding-0_6b-spark-4-stacked-beside-nemotron-embed.json` |
+| Dell C4130 | 1x Tesla V100 32 GB | 32 GB HBM2 | Solo serving through the catalog (a Volta-specific engine image) | `20260919-040456-qwen3_6-35b-a3b-nvfp4-pollux-v100-solo-onecat-src-full.json` |
 
-All GB10 systems share the same core: NVIDIA Blackwell GPU + Arm Grace CPU on NVLink-C2C, 1 petaFLOP FP4, dual-port ConnectX-7 fabric. Connect two units with the NVLink Bridge for TP=2 (244 GB VRAM, ~$6–8K total).
+GB10 nodes are linked to each other over their ConnectX-7 QSFP ports (RoCE).
+There is no NVLink bridge between nodes in this product.
 
-### Data center / AI accelerators
+### Expected to work, untested
 
-| GPU | VRAM | Architecture | Tier |
-|---|---|---|---|
-| B200 | 192 GB HBM3e | Blackwell | Data center |
-| H200 | 141 GB HBM3e | Hopper | Data center |
-| H100 SXM5 / PCIe | 80 GB HBM3 | Hopper | Data center |
-| A100 80 GB | 80 GB HBM2e | Ampere | Data center |
-| A100 40 GB | 40 GB HBM2e | Ampere | Data center |
-| L40S | 48 GB GDDR6 ECC | Ada Lovelace | Inference / viz |
-| L40 | 48 GB GDDR6 ECC | Ada Lovelace | Inference / viz |
-| A40 | 48 GB GDDR6 ECC | Ampere | Data center / viz |
-| L4 | 24 GB GDDR6 ECC | Ada Lovelace | Edge inference (72W) |
-| A30 | 24 GB HBM2 | Ampere | Data center |
-| A10 | 24 GB GDDR6 ECC | Ampere | Inference |
-| A16 | 4× 16 GB GDDR6 | Ampere | VDI |
-| A2 | 16 GB GDDR6 | Ampere | Edge |
+- **Dell Pro Max with GB10** and **HP ZGX Nano AI Station** share the GB10 part
+  with the DGX Spark and the GX10, so the same engine image should run on them.
+  Nobody has run AINode on either yet.
+- **Any other Linux machine with an NVIDIA GPU and a CUDA driver** is a design
+  goal, not a verified claim. The default engine image
+  (`scitrera/dgx-spark-vllm:0.17.0-t5`) is an aarch64 GB10 build; a different GPU
+  needs a different engine image, set through `NVIDIA_VLLM_IMAGE` or a catalog
+  recipe's `engine_image`. The V100 row above is the one example of that so far.
 
-### Professional workstation
-
-| GPU | VRAM | Architecture | Tier |
-|---|---|---|---|
-| RTX PRO 6000 Blackwell | 96 GB GDDR7 ECC | Blackwell | Pro workstation |
-| RTX 6000 Ada | 48 GB GDDR6 ECC | Ada Lovelace | Pro workstation |
-| RTX 5000 Ada | 32 GB GDDR6 ECC | Ada Lovelace | Pro workstation |
-| RTX 4500 Ada | 24 GB GDDR6 ECC | Ada Lovelace | Pro workstation |
-| RTX 4000 Ada | 20 GB GDDR6 ECC | Ada Lovelace | Pro workstation |
-| RTX A6000 | 48 GB GDDR6 ECC | Ampere | Pro workstation |
-| RTX A5000 | 24 GB GDDR6 ECC | Ampere | Pro workstation |
-| RTX A4000 | 16 GB GDDR6 ECC | Ampere | Pro workstation |
-| RTX A2000 12 GB | 12 GB GDDR6 ECC | Ampere | Pro entry |
-
-### Consumer — GeForce RTX 50 series (Blackwell, 2025)
-
-| GPU | VRAM | MSRP |
-|---|---|---|
-| RTX 5090 | 32 GB GDDR7 | $1,999 |
-| RTX 5080 | 16 GB GDDR7 | $999 |
-| RTX 5070 Ti | 16 GB GDDR7 | $749 |
-| RTX 5070 | 12 GB GDDR7 | $549 |
-| RTX 5060 Ti | 8 / 16 GB GDDR7 | ~$379–$499 |
-
-### Consumer — GeForce RTX 40 series (Ada Lovelace, 2022–2024)
-
-| GPU | VRAM | MSRP |
-|---|---|---|
-| RTX 4090 | 24 GB GDDR6X | $1,599 |
-| RTX 4080 Super | 16 GB GDDR6X | $999 |
-| RTX 4070 Ti Super | 16 GB GDDR6X | $799 |
-| RTX 4070 Super / 4070 | 12 GB GDDR6X | $599 |
-| RTX 4060 Ti 16 GB | 16 GB GDDR6 | $499 |
-| RTX 4060 Ti / 4060 | 8 GB GDDR6 | $299–$399 |
-
-### Consumer — GeForce RTX 30 series (Ampere, 2020–2022)
-
-| GPU | VRAM |
-|---|---|
-| RTX 3090 Ti / 3090 | 24 GB GDDR6X |
-| RTX 3080 Ti | 12 GB GDDR6X |
-| RTX 3080 12 GB | 12 GB GDDR6X |
-| RTX 3070 Ti / 3070 | 8 GB |
-| RTX 3060 | 12 GB GDDR6 |
-| RTX 3060 Ti | 8 GB GDDR6 |
-
-<Tip>
-**Minimum for inference:** 8 GB VRAM (runs Qwen 1.5B–3B).  
-**Recommended for 7B–13B models:** 16–24 GB VRAM (RTX 3090 / 4090 / A5000).  
-**For 70B+ models:** 48–80+ GB or multi-node cluster (GB10, A100, H100, L40S, A40).  
-vLLM works best on Ampere (sm_80) or newer. Turing (RTX 20-series) is supported with limitations.
-</Tip>
+If you run AINode on hardware not listed here, measure it and
+[send us the record](/guides/tested-models).
 
 ---
 
 ## Live cluster demo
 
-<img src="/cluster-4node.gif" alt="AINode 4-node cluster — live topology with pulsing connections" style={{ borderRadius: '8px', border: '1px solid rgba(118,185,0,0.2)' }} />
+<img src="/cluster-4node.gif" alt="AINode 4-node cluster, live topology with pulsing connections" style={{ borderRadius: '8px', border: '1px solid rgba(118,185,0,0.2)' }} />
 
-*Four GB10 nodes (3× DGX Spark + 1× ASUS GX10), 487 GB aggregated VRAM, automatic UDP discovery, live pulsing connections.*
+*Four GB10 nodes (3x DGX Spark + 1x ASUS GX10). The 487 GB figure is the UI's sum of the four nodes' GPU memory; UDP discovery joins them automatically.*
 
 ---
 
 ## Architecture
 
-AINode ships as a slim (~500 MB) orchestrator container. The installer resolves the **highest numeric GHCR tag** and pulls that pinned image (e.g. `ghcr.io/getainode/ainode:0.5.2`) — never a floating `:latest` (it only falls back to `:latest` if tag resolution fails). The resolved tag is written to `~/.ainode/image.env`. Every node in the cluster runs the same image.
+A node runs **two images at minimum**: the slim AINode orchestrator, and one
+engine container per loaded model.
 
 ```
-ghcr.io/getainode/ainode:0.5.2   ← pinned tag resolved + pulled by the installer
-         │  (slim ~500 MB orchestrator — no torch, no vLLM in this image)
-         │
-         ├── aiohttp web server (chat UI + API proxy, port 3000 / 8000)
-         ├── engine launcher → separate GPU engine container
-         │       (eugr `ghcr.io/getainode/ainode-base` by default; NVIDIA backend opt-in)
-         │       runs `vllm serve` via the mounted Docker socket
-         ├── UDP discovery broadcaster (port 5679)
-         └── training pipeline (LoRA / QLoRA / Full — spawned GPU container)
+ghcr.io/getainode/ainode:<version>     pinned tag, resolved and pulled by the installer
+         |  (slim Python orchestrator: no torch, no vLLM, no CUDA in this image)
+         |
+         +-- aiohttp app on port 3000: web UI, /v1 proxy with routing + failover,
+         |   /api management, /metrics (ainode_*)
+         +-- engine launcher: one vLLM engine CONTAINER per loaded model,
+         |   started over the mounted Docker socket
+         |       image = the catalog recipe's engine_image, else
+         |               scitrera/dgx-spark-vllm:0.17.0-t5 (Docker Hub, no login)
+         |       primary on port 8000, stacked instances on 8001, 8002, ...
+         +-- UDP discovery broadcaster (the discovery port in config.json; the installer writes 5679)
+         +-- training / quantization: a spawned GPU container from a locally built image
 ```
 
-The vLLM engine is **not** an in-process subprocess: the slim orchestrator launches a separate vLLM engine container over the mounted Docker socket. The **default engine backend** is eugr/spark-vllm-docker (`ghcr.io/getainode/ainode-base`); an **opt-in** NVIDIA backend (`engine_backend: "nvidia"`, v0.5.0+) runs vLLM in NVIDIA's container instead. No host Python venv. No source builds.
+The installer resolves the **highest numeric GHCR tag**, pulls that pinned
+image (never a floating `:latest`, which it only falls back to when tag
+resolution fails), writes the tag to `~/.ainode/image.env`, and pre-pulls the
+engine image the code will launch. Every node in a cluster should run the same
+AINode image. There is no Docker Hub mirror of the AINode image; GHCR is the
+only registry.
 
-The systemd unit reads the pinned tag from an `image.env` `EnvironmentFile` and runs `Restart=always`, so units are swappable and survive cold power cycles with automatic model replay on boot. Upgrade is `ainode update`, which resolves + pulls the newest numeric tag, rewrites `image.env`, and restarts.
+The engine backend is `"nvidia"` by default: the engine is its own container,
+so nothing in the orchestrator image has to carry vLLM. An older `"eugr"`
+backend (eugr/spark-vllm-docker's launcher plus a `vllm` binary on PATH) is
+still selectable by name in `config.json`, but nothing shipped provides those
+pieces, so a node installed the documented way uses `nvidia`.
+
+The systemd unit reads the pinned tag from `image.env` through an
+`EnvironmentFile` and runs with `Restart=always`, so a node survives a cold
+power cycle and replays its models on boot. Upgrading is `ainode update`, run
+as the service user: it resolves and pulls the newest numeric tag, rewrites
+`image.env`, and restarts (see [Updating AINode](/guides/update)).
 
 ---
 
 ## License
 
-Apache 2.0. Free forever. Powered by [argentos.ai](https://argentos.ai).
+Apache 2.0. Free forever. Made in Texas.
