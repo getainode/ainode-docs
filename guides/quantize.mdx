@@ -4,17 +4,32 @@ description: "Compress any model to AWQ or NVFP4 on your own GPU, then serve it 
 icon: "compress"
 ---
 
-AINode quantizes models **on your own GPU** — no external service, no notebook. A
+AINode quantizes models **on your own GPU**: no external service, no notebook. A
 quant job runs `llm-compressor` one-shot PTQ inside a **spawned GPU container** and
 writes a compressed-tensors checkpoint that vLLM serves natively.
 
 <Note>
-The shipped orchestrator image is intentionally slim (no `torch`), so — exactly
-like training — a quant job runs in a GPU container spawned from the quant image
-(`--gpus all`, single-node, single-GPU). Your model store is mounted **read-write**
+The shipped orchestrator image is intentionally slim (no `torch`), so, exactly
+like training, a quant job runs in a GPU container spawned from the quant image
+(`--gpus all`, single node, single GPU). Your model store is mounted **read-write**
 so the runner reads the base weights and writes the output back into
 `~/.ainode/models/`. Cancelling the job tears down the container.
 </Note>
+
+<Warning>
+**The quant image is built locally.** The job runs in `ainode-quant:0.17.0-t5`,
+built from `scripts/Dockerfile.quant` in the product repo. CI does not build it
+and no registry carries it, so build it once on the node (on an aarch64 GB10,
+where the base engine image is already pulled):
+
+```bash
+git clone https://github.com/getainode/ainode && cd ainode
+docker build -f scripts/Dockerfile.quant -t ainode-quant:0.17.0-t5 .
+```
+
+A submit on a node without the image answers 400 with that build command.
+`AINODE_QUANT_IMAGE` points the job at an image the node already has.
+</Warning>
 
 ## Run a quantization
 
@@ -26,19 +41,19 @@ Open **Training → Quantize a Model**.
     An on-disk copy is used automatically when present (offline + reproducible).
   </Step>
   <Step title="Scheme">
-    - **AWQ** — W4A16, 4-bit weights (asymmetric, via `AWQModifier`). Serves as
-      `awq_marlin` on GB10. **Proven.**
-    - **NVFP4** — Blackwell-native 4-bit float (via `QuantizationModifier`). Serves
-      through a MARLIN engine env that AINode applies automatically; verified on
-      dense text models.
+    - **AWQ**: W4A16, 4-bit weights (asymmetric, via `AWQModifier`). Serves as
+      `awq_marlin` on GB10.
+    - **NVFP4**: Blackwell-native 4-bit float (via `QuantizationModifier`). On the
+      pinned default engine image AINode applies a MARLIN engine env for it;
+      recipes on `vllm/vllm-openai:v0.27.1` serve NVFP4 without it.
   </Step>
   <Step title="Calibration samples">
-    Default **256**, drawn from `HuggingFaceH4/ultrachat_200k`. More samples =
-    better calibration, longer job.
+    Default **256**, drawn from `HuggingFaceH4/ultrachat_200k`. More samples
+    means better calibration and a longer job.
   </Step>
   <Step title="Push to Hugging Face (optional)">
     Tick **Push result to Hugging Face** and (optionally) name the repo. Requires a
-    **write** token — see [Tokens & Secrets](/guides/secrets). Write scope is
+    **write** token (see [Tokens & Secrets](/guides/secrets)). Write scope is
     validated **before** the job runs, so a read-only token fails fast (`400`)
     instead of after a multi-GB compute. The push happens after the job finishes and
     creates a **private** repo under your token's namespace.
@@ -47,8 +62,8 @@ Open **Training → Quantize a Model**.
 
 <Warning>
 The target node must be **idle**. Quantization needs the node's full unified memory,
-so AINode refuses to start a quant job while a model is loaded on that node — **unload
-all models on the node first** (or resubmit with `force: true`). You'll get a `409`
+so AINode refuses to start a quant job while a model is loaded on that node: **unload
+all models on the node first** (or resubmit with `force: true`). You get a `409`
 otherwise.
 </Warning>
 
@@ -63,10 +78,11 @@ complete (vLLM-servable), keeps the vision tower, embeddings, `lm_head` and the
 `linear_attn` projections in bf16, and saves the image processor.
 
 <Note>
-**AWQ on Qwen3.5 is verified servable. NVFP4 on Qwen3.5 is experimental and not yet
-validated** — prefer AWQ for the Qwen3.5 family today. (NVFP4 is proven on dense
-text models such as the Llama-3.1-8B-NVFP4 and Nemotron-Cascade NVFP4 catalog
-entries.)
+Quantization jobs have **no bench record** yet: the feature exists and runs, but
+nothing an AINode quant job produced has been measured. What is measured is
+*serving* vendor NVFP4 checkpoints on GB10: Qwen3.8 27B NVFP4 (dense), Ornith
+1.5 35B-A3B NVFP4 and Nemotron 3.5 Lightning NVFP4 (MoE), all on
+[Tested Models](/guides/tested-models). No AWQ catalog entry has a record.
 </Note>
 
 ## Serving a quantized model
@@ -74,12 +90,13 @@ entries.)
 You don't hand-edit quantization flags. AINode reads the on-disk `config.json` and
 picks the right kernel path automatically:
 
-- **AWQ** serves as `awq_marlin` on GB10 (sm120) — the proven kernel path.
-- **NVFP4** serves via a MARLIN engine env applied automatically when the config
+- **AWQ** serves as `awq_marlin` on GB10 (sm121).
+- **NVFP4** serves natively on `vllm/vllm-openai:v0.27.1` recipes; on the pinned
+  default engine image AINode applies a MARLIN engine env when the config
   reports NVFP4 quantization.
 
 A per-load `quantization` override is honored if you ever need to force it. See
-[Troubleshooting → Quantized models on GB10](/troubleshooting).
+[Troubleshooting: Quantized models on GB10](/troubleshooting).
 
 ## API
 
@@ -109,11 +126,5 @@ front. To override the idle-node guard, add `"force": true`.
 ## Why 4-bit on GB10
 
 GB10 decode is memory-bandwidth bound. 4-bit weights mean fewer bytes read per
-token, so a quantized model both **fits more easily** and **decodes faster**. AWQ
-(`awq_marlin`) is the proven kernel path on GB10's sm120; NVFP4 is Blackwell-native
-and serves via the MARLIN env.
-
-<Info>
-Containerized quantization landed in 0.5.0 and is current as of **0.5.2**. Run
-`ainode update` if **Training → Quantize a Model** isn't in your dashboard.
-</Info>
+token, so a quantized model both **fits more easily** and **decodes faster**. The
+measured NVFP4 numbers on GB10 are on [Tested Models](/guides/tested-models).

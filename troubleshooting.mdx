@@ -6,14 +6,22 @@ icon: "wrench"
 
 ## Engine fails to start
 
-**Symptom:** `Engine failed to become ready within 5 minutes` in the logs.
+**Symptom:** a line like
+`boot primary <model> never bound on :8000 after 312s (no engine activity or log for 300s); relaunching once`
+in the AINode service log. The bind wait is adaptive: an engine that shows no activity (no container CPU time, no log
+line) for 300 s is treated as dead and relaunched once, and a launch that is
+still making progress is allowed up to 3600 s. Both knobs are in `config.json`
+(`engine_bind_log_silence_seconds`, `engine_bind_ceiling_seconds`).
 
-Check `ainode logs -f` for the specific error.
+Check `ainode logs -f` for the engine's own error. As of the current release
+`ainode logs` follows the log the configured backend writes
+(`~/.ainode/logs/nvidia-vllm.log`, or `nvidia-distributed.log` on a
+distributed head) and prints which file it is tailing.
 
 ### Gated model 401 error
 
 ```
-GatedRepoError: 401 Client Error — Access to model meta-llama/... is restricted
+GatedRepoError: 401 Client Error. Access to model meta-llama/... is restricted
 ```
 
 **Fix:**
@@ -25,15 +33,25 @@ sudo systemctl restart ainode
 
 ### CUDA out of memory
 
-**Fix:** Reduce `batch_size`, enable gradient checkpointing, or switch to a smaller model / QLoRA.
+**Fix:** reduce `batch_size`, enable gradient checkpointing, or switch to a smaller model / QLoRA.
 
 ### Quantized models on GB10 (AWQ / NVFP4)
 
-AWQ **does** serve on GB10 (sm_121) — vLLM runs it as `awq_marlin` (e.g. ~19 t/s on a 9B, ~27 t/s on an A3B MoE). NVFP4 also serves, via a MARLIN engine env applied automatically when the on-disk `config.json` reports NVFP4 quantization. You do not need to hand-edit quantization flags; a per-load `quantization` override is honored when set.
+AWQ serves on GB10 (sm121) through vLLM's `awq_marlin` path. NVFP4 serves too:
+on the pinned default engine image AINode applies a MARLIN engine env when the
+on-disk `config.json` reports NVFP4 quantization; recipes that run on
+`vllm/vllm-openai:v0.27.1` do not need it. You do not hand-edit quantization
+flags; a per-load `quantization` override is honored when set. The measured
+NVFP4 models are on [Tested Models](/guides/tested-models); no AWQ entry in the
+catalog has a bench record yet.
 
 ## Stacked loads (2nd+ model on a node)
 
-Each node can serve **multiple models at once** (model stacking). Stacked instances each get their own port (8001, 8002, …) and their own `served_model_name` alias(es); the master router routes `/v1/*` by requested model name to the instance serving it, so two loads no longer collide on the primary `:8000` slot or the same served name. Per-load `served_model_name` aliases persist across restarts.
+Each node can serve **multiple models at once** (model stacking). Stacked
+instances each get their own port (8001, 8002, ...) and their own
+`served_model_name` alias(es); the master router routes `/v1/*` by requested
+model name to the instance serving it. Per-load `served_model_name` aliases
+persist across restarts.
 
 ### Stacked load rejected: HTTP 400
 
@@ -41,9 +59,11 @@ Each node can serve **multiple models at once** (model stacking). Stacked instan
 A stacked load (2nd+ model on this node) must specify gpu_memory_utilization explicitly
 ```
 
-**Cause:** A 2nd+ model on a node needs an explicit memory reservation — the node default could push total reservation past capacity and hard-crash the GB10 (unified memory → host death).
+**Cause:** a 2nd+ model on a node needs an explicit memory reservation. The
+node default could push the total reservation past capacity and hard-crash a
+GB10 (unified memory, so the host dies with it).
 
-**Fix:** Include `gpu_memory_utilization` (e.g. `0.4`) in the load request.
+**Fix:** include `gpu_memory_utilization` (e.g. `0.3`) in the load request.
 
 ### Stacked load rejected: HTTP 409
 
@@ -51,63 +71,105 @@ A stacked load (2nd+ model on this node) must specify gpu_memory_utilization exp
 Refusing stacked load: ... would total X (> 0.90 cap). Unload a model or lower gpu_memory_utilization.
 ```
 
-**Cause:** The node's projected total GPU-memory reservation would exceed the 0.90 cap.
+**Cause:** the node's projected total GPU-memory reservation would exceed the
+0.90 cap. The primary's own reservation counts: the installer writes
+`gpu_memory_utilization: 0.6` for the node so that 0.30 is left for one stacked
+neighbour. A node installed before the current release may still carry `0.9`,
+which refuses every stacked load.
 
-**Fix:** Unload a model or lower `gpu_memory_utilization`. The guard runs **before** the live instance is touched, so a rejected load leaves the running model intact.
+**Fix:** unload a model, lower `gpu_memory_utilization`, or lower the primary's
+reservation in `config.json` and relaunch it. The guard runs **before** the
+live instance is touched, so a rejected load leaves the running model intact.
 
 ## VLM / vision model outputs garbage
 
-**Cause:** fp8 KV cache corrupts vision-model generation on GB10 (verified: Qwen2.5-VL emits garbage on fp8, clean on `auto`; text models are unaffected).
+**Cause:** fp8 KV cache corrupts vision-model generation on GB10 (verified:
+Qwen2.5-VL emits garbage on fp8, clean on `auto`; text models are unaffected).
 
-**Fix:** Serve the VLM with `kv_cache_dtype=auto`. AINode auto-downgrades the fp8 KV default to `auto` for multimodal models (detected from `config.json` `vision_config` or a `*VL*`/`Vision` architecture). Opt back in with an explicit per-load `kv_cache_dtype=fp8` only if you know the model/vLLM combo handles it.
+**Fix:** serve the VLM with `kv_cache_dtype=auto`. AINode downgrades the fp8 KV
+default to `auto` for multimodal models (detected from the local `config.json`
+`vision_config` or a `*VL*`/`Vision` architecture). Opt back in with an explicit
+per-load `kv_cache_dtype=fp8` only if you know the model/vLLM combination
+handles it.
 
 <Note>
 Detection reads the **local** `config.json`, so a VLM served straight from a
-repo-id whose weights aren't on disk yet isn't detected until download finishes.
-Fixed in 0.5.1 — run `ainode update`.
+repo id whose weights are not on disk yet is not detected until the download
+finishes. Download first, or pass `kv_cache_dtype: "auto"` on the load.
 </Note>
 
 ## Per-load overrides lost after restart
 
-**Symptom (pre-0.5.1):** a VLM loaded with `kv_cache_dtype=auto` came back on fp8 after a restart (corrupted output).
-
-**Fix:** All override fields — `served_model_name`, `max_model_len`, `kv_cache_dtype`, `quantization`, `trust_remote_code` — now persist and replay correctly across restarts with no cross-model inheritance. Run `ainode update`.
+All override fields (`served_model_name`, `max_model_len`, `kv_cache_dtype`,
+`quantization`, `trust_remote_code`) persist and replay across restarts with no
+cross-model inheritance. If a node still loses them, it is running an old
+release: run `ainode update` as the service user.
 
 ## Model downloaded but not showing in chat
 
-The chat selector only shows models currently **loaded** in vLLM. A downloaded model that isn't running won't appear.
+The chat selector only shows models currently **loaded** in vLLM. A downloaded
+model that is not running will not appear.
 
-**Fix:** In the Server view, find the model → click **Load**. (In 0.5.1 the Load button was wired to actually load — it previously showed a "coming soon" toast. The instance stop control is labeled **Unload**, renamed from DELETE in 0.4.38.)
+**Fix:** in the Server view or on the Models page, find the model and click
+**Load** / **Launch**. The instance stop control is labeled **Unload**.
 
 ## Workers not appearing in topology
 
-- Confirm UDP port 5679 is open between nodes
+- Confirm the discovery port (installer default 5679) is open between nodes
 - All nodes must be on the same L2 subnet (broadcast domain)
-- Check that `cluster_id` matches in `~/.ainode/config.json` on all nodes
+- Check that `cluster_id` matches in `~/.ainode/config.json` on all nodes (the
+  installer writes `ainode-cluster`; the code default for a hand-written config
+  is `default`)
+
+## `sudo ainode update` kept the old image
+
+Run `ainode update` **as the service user**, not through `sudo`. The systemd
+unit reads the install user's `~/.ainode/image.env` (the path is baked into the
+unit at install time). Through 0.5.25 the host wrapper resolved `AINODE_HOME`
+from `$HOME`, which under `sudo` is root's, so `sudo ainode update` pulled the
+image, pinned the new tag in `/root/.ainode/image.env` where nothing reads it,
+restarted the unit, and relaunched the **old** image while reporting success.
+
+As of the current release the wrapper resolves the `AINODE_HOME` the **unit**
+reads: an explicit `AINODE_HOME` first, then the `Environment=AINODE_HOME=` line
+in the unit file, then `$SUDO_USER`'s home. It prints the `image.env` it wrote.
+Where it cannot tell, it refuses and asks you to name one:
+
+```bash
+sudo AINODE_HOME=/home/<user>/.ainode ainode update
+```
+
+If a node reports an update as done but `ainode --version` still shows the old
+tag, look for a stray `/root/.ainode/image.env` and re-run the update as the
+service user.
 
 ## Cluster update fails on a node
 
-If `⬆ Update all` shows a node as failed:
+If **Update all** shows a node as failed:
 
 ```bash
-# SSH into the node directly and run manually
+# SSH into the node and run the update there, as the service user
 ainode update
 ```
 
-`ainode update` (and the dashboard's **Update all** → `POST /api/cluster/update-all`) genuinely pull the newest pinned image and swap it via `~/.ainode/image.env`, then restart. Common failure causes: SSH key not set up, node unreachable, disk full.
+`ainode update` (and the dashboard's **Update all**, which is
+`POST /api/cluster/update-all`) pulls the target image, pins it in the unit's
+`image.env`, and restarts. Common failure causes: the node is unreachable over
+HTTP on port 3000, the pull failed (a pull failure leaves the node on its
+current image), or the disk is full.
 
-## Ray placement group hangs (distributed inference)
+## Multi-node launch hangs at rendezvous
 
-Each node must have **exactly one NIC** with an IP on the cluster subnet. Multiple NICs on the same subnet cause silent hangs.
+The engine containers rendezvous on the head's fabric IP and `--master-port`
+(29501 plus an offset per stacked instance). Each node should have one NIC on
+the cluster subnet, named in `cluster_interface` in `config.json`; AINode sets
+`NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` from it. A peer with no known
+fabric IP is refused with 422 before anything launches.
 
 ```bash
-# Check — should show ONE IP
+# Check: should show ONE IP on the cluster subnet
 ip addr | grep 10.0.0
 ```
-
-## pynvml FutureWarning in logs
-
-This warning is suppressed as of v0.4.1. Run `ainode update` to get the fix.
 
 ## Install fails: `docker daemon not reachable`
 
@@ -119,5 +181,5 @@ newgrp docker
 
 ## Getting help
 
-- [GitHub Issues](https://github.com/getainode/ainode/issues) — file a bug
-- [Releases](https://github.com/getainode/ainode/releases) — check if your issue is already fixed
+- [GitHub Issues](https://github.com/getainode/ainode/issues): file a bug
+- [Releases](https://github.com/getainode/ainode/releases): check whether your issue is already fixed

@@ -18,21 +18,30 @@ description: "Load, stack, download, and manage models via REST."
 | POST | `/api/models/delete-repo` | Delete any downloaded HF repo from disk (free GB) |
 | DELETE | `/api/models/{model_id}` | Delete a downloaded **catalog** model |
 | POST | `/api/engine/set-model` | Switch active model + restart engine (legacy) |
+| GET | `/api/models/search?q=` | Search Hugging Face for servable weights |
+| GET | `/api/models/caps?model=` | Probe a loaded instance for its capabilities (vision above all) and cache the answer; this is the cache the multimodal router reads |
+| GET | `/api/models/card?model=` | The model card for a loaded instance: catalog metadata, the recipe it launched with, verification provenance and its measured load time |
+| GET | `/api/embeddings/models` | Embedding models known to this node and which of them are loaded |
+| POST | `/api/embeddings/models/{model_id}/load` | Load an embedding model as a stacked pooling instance |
+| POST | `/api/embeddings/models/{model_id}/unload` | Unload it |
 
-Catalog / discovery GETs also exist: `/api/models/search?q=`,
-`/api/models/trending`, `/api/models/latest`, `/api/models/recommended`,
-`/api/models/openrouter`, `/api/models/ollama`, `GET /api/models/{model_id}`,
-`POST /api/models/refresh`, and `POST /api/models/{model_id}/download`.
+Catalog / discovery GETs also exist: `/api/models/trending`,
+`/api/models/latest`, `/api/models/recommended`, `/api/models/openrouter`,
+`/api/models/ollama`, `GET /api/models/{model_id}`, `POST /api/models/refresh`,
+and `POST /api/models/{model_id}/download`. Multi-node launches are
+`POST /api/sharding/launch`, documented on the [Cluster API](/api-reference/cluster).
 
 ## Load a model
 
-`POST /api/models/load` is the primary way to bring a model up. Each model gets
-its own container/port, so several **stack** on one node with no full restart.
+`POST /api/models/load` is the primary way to bring a model up on **this
+node**. Each model gets its own engine container and port, so several
+**stack** on one node with no full restart. The engine image is the catalog
+recipe's `engine_image`, or the default `scitrera/dgx-spark-vllm:0.17.0-t5`.
 
 ```bash
 curl -X POST http://localhost:3000/api/models/load \
   -H "Content-Type: application/json" \
-  -d '{"model": "Qwen/Qwen2.5-7B-Instruct"}'
+  -d '{"model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4"}'
 ```
 
 Success returns:
@@ -40,8 +49,8 @@ Success returns:
 ```json
 {
   "status": "launching",
-  "model": "Qwen/Qwen2.5-7B-Instruct",
-  "instance_id": "spark1-head:Qwen/Qwen2.5-7B-Instruct",
+  "model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
+  "instance_id": "spark1-head:ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
   "api_port": 8000,
   "stacked": false,
   "distributed": false
@@ -53,39 +62,41 @@ Success returns:
 | Field | Type | Description |
 |---|---|---|
 | `model` | string | HF repo id (required) |
-| `gpu_memory_utilization` | float | vLLM GPU reservation for this instance (0.05–0.95) |
+| `gpu_memory_utilization` | float | vLLM GPU reservation for this instance (0.05 to 0.95); the catalog recipe's value applies when omitted |
 | `served_model_name` | string or list | API alias(es) the model answers to |
 | `max_model_len` | int | Context length override |
 | `kv_cache_dtype` | string | e.g. `fp8`, `auto` |
 | `quantization` | string | e.g. `awq`, `nvfp4` |
 | `trust_remote_code` | bool | Allow custom modeling code |
-| `strategy` | string | `auto` \| `tensor_parallel` \| `pipeline_parallel` |
 
 <Note>
-Per-load overrides are **persisted and replayed on restart** — onto `NodeConfig`
-for the node's primary model and onto the instance manifest for stacked models —
-so they survive `systemctl restart ainode`.
+Per-load overrides are **persisted and replayed on restart** (onto `NodeConfig`
+for the node's primary model and onto the instance manifest for stacked
+models), so they survive `systemctl restart ainode`. This endpoint is always a
+single-node load; a `strategy` field in the body is accepted for
+compatibility and does not launch anything across nodes.
 </Note>
 
 ### Stacked-load admission control
 
 Loading a 2nd+ model on a node is admission-guarded to protect unified memory:
 
-- If `gpu_memory_utilization` is omitted on a stacked load → HTTP **400**
+- If `gpu_memory_utilization` is omitted on a stacked load: HTTP **400**
   (`A stacked load ... must specify gpu_memory_utilization explicitly`).
-- If existing reservations + the requested value exceed **0.90** total → HTTP
-  **409** (`Refusing stacked load ... > 0.90 cap`).
+- If existing reservations + the requested value exceed **0.90** total: HTTP
+  **409** (`Refusing stacked load ... > 0.90 cap`). The primary's own
+  reservation counts (the installer writes `0.6` for it).
 
 A rejection leaves the already-running models untouched.
 
 ## Load on a specific node
 
-To target a node by id, use the cluster route — it forwards to that node's
+To target a node by id, use the cluster route; it forwards to that node's
 `/api/models/load` over the fabric (no SSH):
 
 ```bash
 curl -X POST http://localhost:3000/api/cluster/load \
-  -d '{"node_id": "spark2", "model": "Qwen/Qwen2.5-7B-Instruct", "gpu_memory_utilization": 0.4}'
+  -d '{"node_id": "spark2", "model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4", "gpu_memory_utilization": 0.3}'
 ```
 
 ## Unload a model
@@ -96,14 +107,14 @@ model lives on another node.
 
 ```bash
 curl -X POST http://localhost:3000/api/models/unload \
-  -d '{"model": "Qwen/Qwen2.5-7B-Instruct"}'
+  -d '{"model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4"}'
 ```
 
 ```json
 {
   "stopped": true,
-  "model": "Qwen/Qwen2.5-7B-Instruct",
-  "instance_id": "spark1-head:Qwen/Qwen2.5-7B-Instruct",
+  "model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
+  "instance_id": "spark1-head:ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
   "remaining": 1,
   "errors": []
 }
@@ -141,7 +152,7 @@ On success it sets the status to `cancelling` and removes the partial files.
 ## Delete a model from disk
 
 `POST /api/models/delete-repo` deletes **any** downloaded HF repo directory and
-reports the reclaimed space — the "free GB from disk" path.
+reports the reclaimed space: the "free GB from disk" path.
 
 ```bash
 curl -X POST http://localhost:3000/api/models/delete-repo \
@@ -166,6 +177,6 @@ curl -X POST http://localhost:3000/api/engine/set-model \
 ```
 
 Saves to config and restarts the vLLM engine. `model` must be an `org/name`
-repo id or the call returns 400. This is the legacy single-model restart path —
+repo id or the call returns 400. This is the legacy single-model restart path;
 prefer `/api/models/load`, which stacks, avoids a full restart, and accepts
 per-load overrides.

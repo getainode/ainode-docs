@@ -1,44 +1,53 @@
 ---
 title: "Networking"
-description: "Port requirements, NIC rules, and NCCL tuning."
+description: "Port requirements, NIC rules, and NCCL environment."
 ---
 
 ## Ports
 
 | Port | Protocol | Service |
 |---|---|---|
-| 3000 | TCP | AINode web UI + management API |
-| 8000 | TCP | Inference API + Prometheus metrics |
-| 5679 | UDP | Peer discovery broadcast |
-| 6379 | TCP | Ray head |
-| 10001–10009 | TCP | Ray workers |
-| 29500 | TCP | NCCL rendezvous |
+| 3000 | TCP | The AINode app: web UI, management API, the federated `/v1` proxy, and `/metrics` (`ainode_*`) |
+| 8000 | TCP | The primary vLLM engine container on this node: its own `/v1` (one model, no routing) and its own `/metrics` (`vllm:*`) |
+| 8001, 8002, ... | TCP | Stacked engine instances, one port each |
+| 5679 | UDP | Peer discovery broadcast (the installer's `discovery_port`; the code default is 5678 for a hand-written config) |
+| 29501 (+ offset) | TCP | Multi-node rendezvous (`--master-port`) between the head's engine container and each peer's `--headless` rank; the offset is the head instance's port minus 8000 |
 
-## Critical: single NIC per cluster subnet
+The engine containers run with host networking, so NCCL's own connections
+between nodes go over the fabric NIC directly.
 
-Each node must have **exactly one NIC** with an IP on the cluster subnet. Multiple NICs on the same subnet cause Ray placement group creation to hang indefinitely with no error message.
+## One fabric NIC per cluster subnet
+
+Each node should have exactly **one NIC** with an IP on the cluster subnet, and
+`cluster_interface` in `config.json` should name it. AINode pins the NCCL and
+Gloo socket interfaces to it on every engine container; a second NIC on the
+same subnet is an ambiguity you do not want at rendezvous time.
 
 ```bash
-# Check — should show ONE IP on your cluster subnet
+# Check: should show ONE IP on your cluster subnet
 ip addr | grep 192.168.0
 ```
 
 ## NCCL interface selection
 
-Set in `~/.ainode/config.json`:
+Set in `~/.ainode/config.json` (the installer auto-detects it):
 
 ```json
 {"cluster_interface": "enP2p1s0f1np1"}
 ```
 
-AINode sets `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `UCX_NET_DEVICES`, and `NCCL_IB_HCA` automatically from this value.
+AINode sets `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `UCX_NET_DEVICES`, and
+`NCCL_IB_HCA` automatically from this value and the node's RDMA devices, and
+maps `/dev/infiniband` into the engine container when the host has it. The
+NCCL library itself is whatever the engine image ships.
 
-## RoCE tuning (ConnectX-7)
+## RoCE (ConnectX-7)
 
 ```bash
-# Verify NCCL is using RoCE
+# Verify NCCL is using RoCE (ainode logs follows the configured backend's log;
+# on a distributed head that is nvidia-distributed.log)
 ainode logs -f | grep "Using network"
-# Expected: "NET/IB ... mlx5_0:1/RoCE ... speed=200000"
+# Expected: an IB/RoCE line naming the mlx5 device, not "Socket"
 
 # Optional: enable GPU Direct RDMA
 sudo modprobe nvidia-peermem
@@ -46,4 +55,6 @@ sudo modprobe nvidia-peermem
 
 ## Tailscale
 
-Use Tailscale for management SSH only. **Never use Tailscale IPs for NCCL** — the ~2ms RTT collapses multi-GPU throughput.
+Use Tailscale for management SSH only. **Never use Tailscale IPs for NCCL or
+for `peer_ips`**: the added RTT on every collective collapses multi-node
+throughput.

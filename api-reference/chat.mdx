@@ -1,16 +1,18 @@
 ---
 title: "Chat & Completions"
-description: "OpenAI-compatible inference endpoints."
+description: "OpenAI-compatible inference endpoints, plus the Anthropic Messages shape and typed decisions, all routed across the fleet on port 3000."
 ---
 
-The raw single-node vLLM serves these endpoints on port **8000**. The AINode
-aiohttp proxy **also** serves them on port **3000** with cross-node routing and
-failover — pick the port by deployment:
+The AINode proxy on port **3000** serves these endpoints with cross-node
+routing and failover: the body's `model` picks the node, a dead node fails
+over to the next candidate, and streaming passes through. Port **8000** is the
+raw primary vLLM engine on one node and serves the OpenAI paths for that one
+model only.
 
 <Note>
-On a **multi-node** cluster, target port **3000**. The proxy forwards each
-request to whichever node serves the requested model and fails over if a node
-drops. Port `8000` only ever reaches the one node's local vLLM.
+Target port **3000**. The proxy forwards each request to whichever node serves
+the requested model. Port `8000` only ever reaches the one engine on that node,
+and is closed until a model is loaded there.
 </Note>
 
 ## Chat completions
@@ -19,7 +21,7 @@ drops. Port `8000` only ever reaches the one node's local vLLM.
 
 ```json
 {
-  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
   "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "Hello!"}
@@ -30,13 +32,17 @@ drops. Port `8000` only ever reaches the one node's local vLLM.
 }
 ```
 
+`model` is the id as served (the Hugging Face repo id, or a `served_model_name`
+alias set on the load). A model no node serves is a `404` (`model_not_found`);
+every candidate unreachable is a `502`.
+
 ## Text completions
 
 `POST http://localhost:3000/v1/completions`
 
 ```json
 {
-  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
   "prompt": "The quick brown fox",
   "max_tokens": 64
 }
@@ -44,37 +50,95 @@ drops. Port `8000` only ever reaches the one node's local vLLM.
 
 ## Streaming
 
-Set `"stream": true` — response is server-sent events, same as OpenAI.
+Set `"stream": true`; the response is server-sent events, same as OpenAI.
 
 ```bash
 curl http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "Qwen/Qwen2.5-7B-Instruct", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'
+  -d '{"model": "ornith-ai/Ornith-1.5-35B-A3B-NVFP4", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'
 ```
 
 ## Embeddings
 
 `POST http://localhost:3000/v1/embeddings`
 
+`/v1/embeddings` is routed **fleet-wide**: the same candidate list and failover
+as the chat proxy, forwarding the body verbatim to a vLLM instance launched
+with `--runner pooling` that serves the requested embedding model. An
+embedding model is a stacked instance like any other; load one from the
+catalog (Qwen3 Embedding 0.6B is the verified entry) or through
+`POST /api/embeddings/models/{model_id}/load`.
+
 ```json
 {
-  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "model": "Qwen/Qwen3-Embedding-0.6B",
   "input": "The quick brown fox"
 }
 ```
+
+`input` is a string or an array of strings. A chat model id sent here is a
+`400` from the engine (a chat runner does not embed), and a model no node
+serves is a `503` (`dependency_missing`) from the node itself.
+
+## Anthropic Messages
+
+`POST http://localhost:3000/v1/messages`
+
+The Anthropic Messages shape, forwarded by the same proxy as chat completions:
+routed on the body's `model`, with transport failover across the fleet and SSE
+passthrough. The query string is forwarded too, so `?beta=true` works, and
+`x-api-key`, `anthropic-version` and `anthropic-beta` headers reach the engine
+untouched. This is how Claude Code and the Anthropic SDKs are pointed at the
+fleet: set the base URL to `http://<node>:3000` (the client appends
+`/v1/messages` itself).
+
+`POST http://localhost:3000/v1/messages/count_tokens` counts tokens for an
+Anthropic-shaped body through the same proxy.
+
+## Decisions
+
+`POST http://localhost:3000/v1/decide`
+
+Typed questions in, probabilities out. Post a `state` (a string or a JSON
+object), optional `instructions`, and a map of `questions`; each question is a
+list of `options` (2 to 255 distinct strings), a `"type": "boolean"`, or a
+`"type": "score"` with `min` and `max`. Every question is answered at once with
+`answer`, `confidence`, `distribution` (keyed by your option strings) and
+`latency_ms`, plus `usage`. `model` is optional and defaults to the node's
+loaded model. A bad request is a `400` naming what is wrong, an engine that
+cannot answer is a `503`, and a `200` always carries every question asked.
+
+```bash
+curl -s http://localhost:3000/v1/decide -H 'Content-Type: application/json' -d '{
+  "state": {"subject": "Invoice PDF download returns 500 since Tuesday", "plan": "pro"},
+  "instructions": "B2B SaaS support queue. Revenue-blocking regressions outrank cosmetic bugs.",
+  "questions": {
+    "category":    {"question": "Which queue should this go to?",
+                    "options": ["billing", "bug", "feature request", "account access", "spam"]},
+    "urgency":     {"question": "How urgent is this, 1 lowest and 5 highest?",
+                    "type": "score", "min": 1, "max": 5},
+    "needs_human": {"question": "Does this need a human to reply?", "type": "boolean"}
+  }
+}'
+```
+
+Each question is one chat completion constrained by vLLM's structured-output
+choice grammar, with thinking off; the distribution is a softmax over the first
+token's logprobs restricted to the option labels. The decision bench that
+scores this on calibration is on [Tested Models](/guides/tested-models).
 
 ## List models
 
 `GET http://localhost:3000/v1/models`
 
 On port **3000** this returns the **federated union** of models served across
-the whole fleet. On port **8000** it returns only that one node's local vLLM
-models.
+the whole fleet. On port **8000** it returns only that one engine's model.
 
 ## Compatible clients
 
-- Python: `openai` SDK, `langchain`, `litellm`
+- Python: `openai` SDK, `langchain`, `litellm`; `anthropic` SDK against `/v1/messages`
 - Node.js: `openai` npm package
 - Go: `sashabaranov/go-openai`
 - Open WebUI: set base URL to `http://localhost:3000/v1`
+- Claude Code: `ANTHROPIC_BASE_URL=http://<node>:3000`
 - Anything else that speaks OpenAI

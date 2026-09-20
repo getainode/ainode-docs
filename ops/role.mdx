@@ -7,30 +7,34 @@ description: "Configure a node as master, worker, or solo."
 
 | Role | Command | Behavior |
 |---|---|---|
-| **master** | `ainode role master` | Runs vLLM, manages cluster, serves chat UI |
-| **worker** | `ainode role worker` | No engine — starts instantly, waits for master to assign work |
-| **solo** | `ainode role solo` | Standalone node, no clustering (default) |
+| **master** | `ainode role master` | Runs its own engine, manages the cluster, serves the chat UI, heads multi-node launches (`distributed_mode: head`) |
+| **worker** | `ainode role worker` | No engine at start; announces itself and waits for the master to launch something on it (`distributed_mode: member`) |
+| **solo** | `ainode role solo` | Standalone node, no clustering (the default) |
 
 <Note>
-Setting the **worker** role also clears the node's served model, so the engine is
-skipped on start. A worker won't serve anything until the master assigns it work.
+Setting the **worker** role also clears the node's served model, so the engine
+is skipped on start. A worker serves nothing until the master loads a model on
+it (federated) or includes it in a multi-node launch.
 </Note>
 
 ## Set at install time
 
-Solo is the default — no flag needed. A master node takes its peer list at install
-time so it can SSH-bootstrap the cluster:
+Solo is the default; no flag needed. A master node takes its peer list at
+install time so it can SSH-bootstrap the cluster:
 
 ```bash
 # solo (default)
 curl -fsSL https://ainode.dev/install | bash
 
-# master with peers
+# master with peers (fabric addresses)
 AINODE_PEERS="10.0.0.2,10.0.0.3" curl -fsSL https://ainode.dev/install | bash -s -- --job master
 
 # worker
 curl -fsSL https://ainode.dev/install | bash -s -- --job worker
 ```
+
+`AINODE_PEERS` without `-s -- --job master` gives a solo node: the peer list is
+used for `ssh-copy-id` and nothing else.
 
 ## Change after install
 
@@ -43,5 +47,5 @@ sudo systemctl restart ainode
 
 ```bash
 ainode role
-# → This node is: master  (distributed_mode=head)
+# This node is: master  (distributed_mode=head)
 ```

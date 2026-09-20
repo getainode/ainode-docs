@@ -4,32 +4,41 @@ description: "The open-source projects and community work that AINode builds on.
 icon: "heart"
 ---
 
-The inference core of AINode is powered by vLLM. The shipped **default engine
-backend** is [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)
-(`dgxspark-3node-ring` branch) — its GB10 engine image
-(`ghcr.io/getainode/ainode-base`) drives both single-node (solo) serving and,
-via its launcher, distributed cluster formation, inheriting the robust NCCL
-implementation that has proven most reliable for Grace-Blackwell unified memory
-and fabric (RoCE / 400G switch) topologies. An **opt-in NVIDIA vLLM engine
-backend** (v0.5.0+; set `engine_backend: "nvidia"`) runs vLLM in NVIDIA's own
-container instead — the installer can pre-pull
-[`nvcr.io/nvidia/vllm:26.02-py3`](https://catalog.ngc.nvidia.com/) for it, but
-nothing consumes that image unless you switch backends.
+The inference core of AINode is [vLLM](https://github.com/vllm-project/vllm).
+AINode does not ship vLLM in its own image: the orchestrator is a slim Python
+container, and every loaded model runs as its own vLLM engine container. The
+engine image comes from the catalog recipe (`engine_image`) or, when the entry
+sets none, from `NVIDIA_VLLM_IMAGE`, which defaults to the community GB10
+build `scitrera/dgx-spark-vllm:0.17.0-t5` on Docker Hub. No NGC credentials
+are involved anywhere in the shipped path.
 
-We are grateful to NVIDIA, eugr, and the broader vLLM / Ray / Spark community
-whose hard work on real hardware made this project possible.
+The catalog's proven recipes lean on several community engine builds: stock
+`vllm/vllm-openai` releases and nightlies for the Qwen3.8 and Nemotron 3.5
+entries, a DSpark runtime image for DeepSeek V4 Flash, a 1Cat-vLLM build with
+Volta kernels for the Tesla V100 entry, and a plugin-carrying image for
+Spark-X2.5. Each entry names its image, so you can see what you are running.
+
+The `"eugr"` engine backend, from
+[eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker), was the
+0.4.x-era default and is still selectable by name in `config.json`. It needs a
+`vllm` binary on PATH and eugr's `launch-cluster.sh`, neither of which is in the
+shipped image, so it is a developer path today.
+
+We are grateful to NVIDIA, eugr, and the wider vLLM and DGX Spark community
+whose work on real hardware made this project possible.
 
 ## Key dependencies
 
 | Project | Role |
 |---|---|
-| [vLLM](https://github.com/vllm-project/vllm) | High-performance inference engine |
-| [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) | **Default engine** — GB10 NCCL 3-node ring fix, solo serving + distributed cluster launcher |
-| [NVIDIA vLLM image](https://catalog.ngc.nvidia.com/) | Optional engine container for the opt-in NVIDIA backend (`nvcr.io/nvidia/vllm`) |
-| [Ray](https://www.ray.io/) | Cross-node distributed orchestration |
-| [NCCL](https://developer.nvidia.com/nccl) | GPU-to-GPU collective communication |
+| [vLLM](https://github.com/vllm-project/vllm) | The inference engine, in its own container per loaded model; its multi-node executor (`--headless` ranks rendezvousing on `--master-addr`) is how a model is launched across nodes |
+| [scitrera/dgx-spark-vllm](https://hub.docker.com/r/scitrera/dgx-spark-vllm) | Default engine image for GB10 when a catalog entry names none |
+| [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) | The opt-in `eugr` backend (0.4.x default), not in the shipped image |
+| [NCCL](https://developer.nvidia.com/nccl) | GPU-to-GPU collectives over RoCE; the library is whatever the engine image ships, AINode sets its environment |
 | [Hugging Face](https://huggingface.co/) | Model hub, Transformers, PEFT, Datasets |
-| [PEFT](https://github.com/huggingface/peft) | LoRA / QLoRA training + adapter merge |
-| [llm-compressor](https://github.com/vllm-project/llm-compressor) | In-browser quantization (AWQ / NVFP4) |
+| [PEFT](https://github.com/huggingface/peft) | LoRA / QLoRA training and adapter merge |
+| [llm-compressor](https://github.com/vllm-project/llm-compressor) | Quantization jobs (AWQ / NVFP4) |
 | [hf_transfer](https://github.com/huggingface/hf_transfer) | Accelerated model downloads |
-| [aiohttp](https://docs.aiohttp.org/) | Async HTTP server for the API + web UI |
+| [aiohttp](https://docs.aiohttp.org/) | Async HTTP server for the API and web UI |
+
+Made in Texas.

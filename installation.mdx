@@ -7,20 +7,19 @@ description: "Install AINode on a single node or a multi-node cluster."
 
 The installer enforces one hard prerequisite:
 
-- **`/mnt/shared-models` must exist**, or the installer aborts. Create it first (for a cluster, mount shared model storage there — NFS from the master is recommended):
+- **`/mnt/shared-models` must exist**, or the installer aborts. Create it first (for a cluster, mount shared model storage there; NFS from the master is recommended):
   ```bash
   sudo mkdir -p /mnt/shared-models
   ```
 
 <Note>
-**NGC login is optional — only for the opt-in NVIDIA engine backend.** AINode's
-default engine is the eugr/spark-vllm-docker build (`ghcr.io/getainode/ainode-base`),
-which needs no NGC credentials. If you plan to switch to the NVIDIA vLLM backend
-(`engine_backend: "nvidia"`, v0.5.0+), the installer can pre-pull
-`nvcr.io/nvidia/vllm:26.02-py3` — provide NGC credentials via `docker login nvcr.io`
-(username `$oauthtoken`, password = your NGC API key), `NGC_API_KEY`, or
-`/etc/ainode/ngc.token`. Without them the pre-pull is skipped, install continues,
-and the default engine is unaffected.
+**Two images, no NGC login.** AINode is a slim orchestrator image
+(`ghcr.io/getainode/ainode:<version>`) plus one vLLM engine container per
+loaded model. The engine image is the catalog recipe's `engine_image`, or
+`scitrera/dgx-spark-vllm:0.17.0-t5` from Docker Hub, which pulls anonymously.
+The installer pre-pulls that default engine image (about 8.5 GB to download,
+about 22 GB on disk); set `AINODE_NVIDIA_IMAGE=skip` to defer it to the first
+model launch, or `AINODE_NVIDIA_IMAGE=<image>` to pre-pull a different one.
 </Note>
 
 ## Single node
@@ -32,24 +31,32 @@ curl -fsSL https://ainode.dev/install | bash
 ## Multi-node cluster
 
 ```bash
-# On the head node — bootstraps SSH to peers automatically
+# On the head node: bootstraps passwordless SSH to each peer (ssh-copy-id, you may be prompted once)
 AINODE_PEERS="10.0.0.2,10.0.0.3" curl -fsSL https://ainode.dev/install | bash -s -- --job master
 
 # On each worker node
 curl -fsSL https://ainode.dev/install | bash -s -- --job worker
 ```
 
-Worker nodes start instantly with no model — they announce themselves to the master and wait for work.
+`AINODE_PEERS` only takes effect together with `--job master`. Without a
+`--job`, the node is installed **solo**: the peer list is used for
+`ssh-copy-id` and nothing else, and `peer_ips` in `config.json` stays empty.
+Give the fabric addresses of the peers (the ConnectX-7 subnet), not management
+LAN or Tailscale addresses; a multi-node launch runs over those.
+
+A worker starts with no model and no engine. It announces itself over UDP and
+waits for the master to launch something on it.
 
 ## Node roles
 
 | Flag | Role | Behavior |
 |---|---|---|
-| `--job master` | Head node | Runs the inference engine, manages the cluster |
-| `--job worker` | Worker node | No model, no engine — waits for the master |
+| `--job master` | Head node | Runs its own engine, manages the cluster, heads multi-node launches |
+| `--job worker` | Worker node | No model, no engine at start; waits for the master |
 | _(none)_ | Solo | Standalone, no clustering |
 
-Under the hood these map to the node's `distributed_mode` config field: master → `head`, worker → `member`, solo → `solo`.
+Under the hood these map to the node's `distributed_mode` config field: master
+maps to `head`, worker to `member`, solo to `solo`.
 
 Change role after install:
 
@@ -71,30 +78,30 @@ consumed by `bash` itself (not the piped script), so it is silently ignored and
 your data is **not** purged.
 </Warning>
 
-## Container images
+## Container image
 
-Both registries serve identical images. GHCR is canonical (what the installer uses).
+The AINode image is published to GHCR only:
 
 ```bash
-docker pull ghcr.io/getainode/ainode:0.5.2      # canonical (pin a numeric tag)
-docker pull argentaios/ainode:latest            # Docker Hub mirror (may lag GHCR)
+docker pull ghcr.io/getainode/ainode:<version>    # pin a numeric tag
 ```
 
 <Tip>
 The installer deliberately resolves and pins the highest numeric tag rather than
-`:latest`, because `:latest` has drifted to ancient builds in the past. If you
-pull manually, pin a numeric tag too.
+`:latest`, because `:latest` has drifted to old builds in the past. If you pull
+manually, pin a numeric tag too. The current tags are on the
+[releases page](https://github.com/getainode/ainode/releases).
 </Tip>
 
 ## What gets installed
 
 | Path | Purpose |
 |---|---|
-| `/etc/systemd/system/ainode.service` | Systemd unit — auto-starts on boot |
-| `/usr/local/bin/ainode` | Host wrapper CLI |
+| `/etc/systemd/system/ainode.service` | Systemd unit, auto-starts on boot; carries `Environment=AINODE_HOME=<install user's ~/.ainode>` |
+| `/usr/local/bin/ainode` | Host wrapper CLI (`ainode update` runs on the host; other commands are forwarded to the container) |
 | `~/.ainode/config.json` | Node configuration |
-| `~/.ainode/image.env` | Pinned container image tag (`EnvironmentFile` the unit reads; swapped by `ainode update`) |
+| `~/.ainode/image.env` | Pinned container image tag (`EnvironmentFile` the unit reads; rewritten by `ainode update`) |
 | `~/.ainode/models/` | Downloaded model weights |
 | `~/.ainode/datasets/` | Training / AutoData datasets |
-| `~/.ainode/logs/` | Engine logs |
+| `~/.ainode/logs/` | Engine logs (`nvidia-vllm.log`, or `nvidia-distributed.log` on a distributed head) |
 | `~/.ainode/training/` | Fine-tune artifacts |

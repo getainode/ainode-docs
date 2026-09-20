@@ -3,68 +3,88 @@ title: "Release Flow"
 description: "How a new AINode version is built, published, and rolled out."
 ---
 
-Releases are **tag-driven**. You no longer build or push images by hand — pushing a
-`vX.Y.Z` git tag triggers CI on a self-hosted DGX Spark (aarch64) runner, which builds
-both the base and product images and pushes them to the registry automatically.
-Operators then upgrade with `ainode update` or the browser **Update all** button.
+Releases are **tag-driven**. Nobody builds or pushes the image by hand: pushing
+a `vX.Y.Z` git tag triggers CI on a self-hosted DGX Spark (aarch64) runner,
+which builds the product image and pushes it to GHCR. Operators then upgrade
+with `ainode update` (as the service user) or the browser **Update all** button.
 
 ## Decision tree
 
 | Change type | Action needed |
 |---|---|
-| Python or web UI code | Bump `version` in `pyproject.toml`, update `CHANGELOG.md`, then `git tag vX.Y.Z && git push origin vX.Y.Z`. CI builds + pushes the image; upgrade nodes with `ainode update`. |
-| vLLM / Ray / base OS | Same tag-triggered flow — CI rebuilds the base image first (it runs `scripts/build-base-image.sh`, cached per runner) as step 1 of the same job. No separate manual base build. |
-| `install.sh` (served from ainode.dev) | Merge to `main`; goes live when the **ainode.dev** site redeploys — not automatically on a product-repo push. |
+| Python or web UI code | Bump `version` in `pyproject.toml`, update `CHANGELOG.md`, then `git tag vX.Y.Z && git push origin vX.Y.Z`. CI builds and pushes the image; upgrade nodes with `ainode update`. |
+| The vLLM engine | Not an AINode release at all. The engine is a separate container per loaded model, from the catalog recipe's `engine_image` or `NVIDIA_VLLM_IMAGE` in `ainode/engine/backends/nvidia.py`. Changing an engine version is a catalog change (a recipe's `engine_image`) or a change to that default, released like any code change. |
+| `install.sh` (served as `https://ainode.dev/install`) | Merge to `main`. `/install` is a redirect to `raw.githubusercontent.com/getainode/ainode/main/scripts/install.sh`, so it goes live the moment `main` moves, with no site redeploy involved. |
 | These docs | Live in the separate **ainode-docs** repo; publish on that repo's deploy, not on a product-repo `main` push. |
 
 ## Cut a release
 
-Bump **one** file, then tag. The version is single-sourced from package metadata, so
-there is exactly one literal to edit.
+Bump **one** file, then tag. The version is single-sourced from package
+metadata, so there is exactly one literal to edit.
 
 ```bash
-# 1. Bump the version — pyproject.toml is the ONLY source of truth.
-#    pyproject.toml:  version = "0.5.3"
-#    ainode/__init__.py reads importlib.metadata.version("ainode") — nothing to edit.
-#    ainode/service/systemd.py derives AINODE_IMAGE_TAG from __version__ — nothing to edit.
+# 1. Bump the version. pyproject.toml is the ONLY source of truth.
+#    pyproject.toml:  version = "X.Y.Z"
+#    ainode/__init__.py reads importlib.metadata.version("ainode"): nothing to edit.
+#    ainode/service/systemd.py derives AINODE_IMAGE_TAG from __version__: nothing to edit.
 
-# 2. Update CHANGELOG.md, commit.
-git commit -am "chore: release 0.5.3"
+# 2. Update CHANGELOG.md, commit (through a PR; main is not pushed to directly).
 
-# 3. Tag and push — this is the whole release action.
-git tag v0.5.3 && git push origin v0.5.3
+# 3. Tag and push. This is the whole release action.
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
 The tag push triggers `.github/workflows/publish-image.yml` on the
 `[self-hosted, dgx-spark, aarch64]` runner. CI:
 
-1. Builds the base image (`scripts/build-base-image.sh`, which clones eugr at the
-   pinned SHA in that script — you never hand-type it) if it isn't already cached.
-2. Builds the AINode image on top of it.
-3. Pushes `ghcr.io/getainode/ainode:0.5.3` to GHCR **and** mirrors it to Docker Hub
-   as `argentos/ainode:0.5.3`.
+1. Verifies the tag matches `pyproject.toml`.
+2. Builds `ghcr.io/getainode/ainode:X.Y.Z` from `scripts/Dockerfile.ainode`
+   (`FROM python:3.12-slim` plus `pip install` of the package; no vLLM, no
+   torch, no CUDA) and smoke-tests that the image reports the release version.
+3. Pushes it to GHCR as `:X.Y.Z` and `:latest`. The installer and
+   `ainode update` pin numeric tags, so `:latest` is a convenience only.
+
+Two things in the workflow are not part of the product image:
+
+- It also rebuilds the eugr engine base (`scripts/build-base-image.sh`,
+  `ghcr.io/getainode/ainode-base`) as a best-effort, non-gating step. The
+  product image is **not** built on it (`Dockerfile.ainode` declares no
+  `BASE_IMAGE`), and nothing shipped consumes it.
+- Its Docker Hub mirror step runs only when a `DOCKERHUB_USER` secret is set
+  and targets a namespace that does not exist. There is no working Docker Hub
+  mirror; GHCR is the only registry.
+
+The training and quantization image (`ainode-quant:0.17.0-t5`,
+`scripts/Dockerfile.quant`) is not built by CI and is not on any registry; a
+node builds it locally (see [Fine-Tuning](/guides/training)).
 
 Humans never run `docker build` / `docker push` for a normal release.
 
 ## Roll out to nodes
 
-Units are **swappable** — the systemd unit reads the image tag from an
-`EnvironmentFile`, so an update swaps the running image without re-rendering the unit.
+Units are **swappable**: the systemd unit reads the image tag from an
+`EnvironmentFile`, so an update swaps the running image without re-rendering
+the unit.
 
 ```bash
-# Single node — pull the latest numeric tag, pin it, restart.
+# Single node, as the service user: pull the newest numeric tag, pin it, restart.
 ainode update
 ```
 
-`ainode update` (no version arg) resolves the **highest numeric GHCR tag**, writes
-`AINODE_IMAGE=…` into `~/.ainode/image.env` (the unit's `EnvironmentFile`), and lets
-`Restart=always` relaunch the container on the new image — no unit re-render. Units
-survive cold power cycles and replay their models automatically. `install.sh` pins that
-same resolved numeric tag; AINode never trusts a floating `:latest`.
+`ainode update` (no version arg) resolves the **highest numeric GHCR tag**,
+writes `AINODE_IMAGE=...` into the `image.env` the unit reads, and restarts the
+unit, which relaunches the container on the new image with no unit re-render.
+Units survive cold power cycles and replay their models automatically.
+`install.sh` pins that same resolved numeric tag; AINode never trusts a
+floating `:latest`. Do not run it through `sudo`: through 0.5.25 that pinned
+the tag in `/root/.ainode/image.env` and relaunched the old image; the current
+wrapper resolves the unit's `AINODE_HOME` and refuses when it cannot tell (see
+[Updating AINode](/guides/update)).
 
 ### Whole cluster at once (recommended)
 
-From the master node, update every discovered node over HTTP instead of SSHing to each:
+From the master node, update every discovered node over HTTP instead of SSHing
+to each:
 
 ```bash
 curl -X POST http://localhost:3000/api/cluster/update-all
@@ -72,21 +92,23 @@ curl -X POST http://localhost:3000/api/cluster/update-all
 curl "http://localhost:3000/api/cluster/update-status?id=<update_id>"
 ```
 
-`POST /api/cluster/update-all` fans out to each worker's `POST /api/engine/update` and
-tracks per-node progress. In the web UI, the **Update all** button on the CLUSTER pill
-does the same, and an **⬆ Update available** badge appears when a newer tag is on GHCR.
+`POST /api/cluster/update-all` fans out to each worker's
+`POST /api/engine/update` on port 3000 and tracks per-node progress. In the web
+UI, the **Update all** button on the CLUSTER pill does the same, and an
+**Update available** badge appears when a newer tag is on GHCR.
 
 ## Roll back
 
-Pass the exact version as a **positional argument** — that pins and pulls that tag:
+Pass the exact version as a **positional argument**; that pins and pulls that
+tag:
 
 ```bash
-ainode update 0.5.1
+ainode update <older-version>
 ```
 
 <Warning>
-Do **not** use `AINODE_IMAGE=…:0.5.1 ainode update` to roll back. With no positional
-version, `update` resolves the highest numeric tag and **upgrades to latest**; the
-`AINODE_IMAGE` env is only a fallback used when tag resolution fails. Always roll back
-with the positional version arg: `ainode update 0.5.1`.
+Do **not** use `AINODE_IMAGE=...:X.Y.Z ainode update` to roll back. With no
+positional version, `update` resolves the highest numeric tag and **upgrades to
+the newest**; the `AINODE_IMAGE` env is only a fallback used when tag resolution
+fails. Always roll back with the positional version arg.
 </Warning>

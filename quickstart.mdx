@@ -1,24 +1,22 @@
 ---
 title: "Quickstart"
-description: "Up and running in under 60 seconds."
+description: "Install AINode, open the UI, pick a model, call the API."
 ---
 
 ## Prerequisites
 
 - Linux (Ubuntu 22.04+)
-- NVIDIA GPU with CUDA 13 drivers
+- NVIDIA GPU with a CUDA driver
 - [Docker Engine](https://docs.docker.com/engine/install/)
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
-- **`/mnt/shared-models` must exist** — the installer aborts without it. Create it first:
+- **`/mnt/shared-models` must exist**, or the installer aborts. Create it first:
   ```bash
   sudo mkdir -p /mnt/shared-models
   ```
   For a cluster, mount shared model storage there (NFS from the master is recommended).
-- **NGC access is optional — only for the opt-in NVIDIA engine backend.** AINode's default engine (eugr/spark-vllm-docker) needs no NGC credentials and inference starts without them. If you plan to switch to the NVIDIA vLLM backend (`engine_backend: "nvidia"`, v0.5.0+), provide NGC credentials before (or right after) install so its image can pull:
-  ```bash
-  docker login nvcr.io          # username: $oauthtoken   password: your NGC API key
-  # ...or set NGC_API_KEY, or place the key in /etc/ainode/ngc.token
-  ```
+
+No NGC login is involved. The engine image the code launches
+(`scitrera/dgx-spark-vllm:0.17.0-t5`) is on Docker Hub and pulls anonymously.
 
 ## Install
 
@@ -27,11 +25,23 @@ curl -fsSL https://ainode.dev/install | bash
 ```
 
 The installer:
-1. Pulls the **AINode orchestrator** — a slim ~500 MB image, resolved to the **highest numeric GHCR tag** (e.g. `ghcr.io/getainode/ainode:0.5.2`) and pinned into `~/.ainode/image.env` (never a floating `:latest`).
-2. Optionally pre-pulls the **NVIDIA vLLM engine image** `nvcr.io/nvidia/vllm:26.02-py3` (~15 GB, 5–10 minutes on a 1 Gbps link) — a best-effort convenience for users who opt into the NVIDIA backend. It's skipped without NGC credentials and install continues; the **default eugr engine** doesn't need it.
-3. Writes `/etc/systemd/system/ainode.service` (system mode) — or `~/.config/systemd/user/ainode.service` in `--user` mode.
-4. Installs `/usr/local/bin/ainode` host wrapper.
+
+1. Resolves the **highest numeric GHCR tag** of `ghcr.io/getainode/ainode`, pulls
+   that slim orchestrator image, and pins the tag into `~/.ainode/image.env`
+   (never a floating `:latest`).
+2. Reads the engine image name out of the image it just pulled and pre-pulls it
+   (about 8.5 GB to download, about 22 GB on disk). `AINODE_NVIDIA_IMAGE=skip`
+   skips this; the first model launch pulls it instead.
+3. Writes `~/.ainode/config.json`: `engine_backend: "nvidia"`, `model: null`,
+   `onboarded: true`, `gpu_memory_utilization: 0.6`, `discovery_port: 5679`,
+   `cluster_id: "ainode-cluster"`, and the node's role.
+4. Writes `/etc/systemd/system/ainode.service` (or
+   `~/.config/systemd/user/ainode.service` with `--user`) and the
+   `/usr/local/bin/ainode` host wrapper.
 5. Starts the service.
+
+`--dry-run` renders the config, the unit and the wrapper into `~/.ainode` and
+stops: no pulls, no systemd, no docker.
 
 ## Open the UI
 
@@ -39,22 +49,31 @@ The installer:
 http://localhost:3000
 ```
 
-First visit runs onboarding — it writes `onboarded: true` with no model selected. Pick a model in the UI and AINode starts loading it in the background. The UI is available immediately; the chat activates once the model finishes loading.
+An installer install starts with **no model loaded** and does not run the
+first-run onboarding wizard (the installer writes `onboarded: true`). Open
+**Models**, pick a catalog entry, and click **Launch**. The first launch
+downloads the weights; the chat activates once the engine reports ready. The
+catalog entries that have been measured on this hardware are listed on
+[Tested Models](/guides/tested-models).
 
 ## API
 
 ```bash
-curl http://localhost:8000/v1/models
+curl http://localhost:3000/v1/models
 ```
 
-The API is OpenAI-compatible. Point any OpenAI client at `http://localhost:8000/v1`.
+The API is OpenAI-compatible. Point any OpenAI client at
+`http://localhost:3000/v1`: that is the AINode proxy, which routes each
+request to whichever node serves the requested model and fails over if a node
+drops. Port `8000` is the raw primary vLLM engine container on this one node
+(one model, no routing, closed until a model is loaded).
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="not-needed")
+client = OpenAI(base_url="http://localhost:3000/v1", api_key="not-needed")
 resp = client.chat.completions.create(
-    model="Qwen/Qwen2.5-7B-Instruct",
+    model="ornith-ai/Ornith-1.5-35B-A3B-NVFP4",   # the id as served, or a served_model_name alias
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(resp.choices[0].message.content)
@@ -63,8 +82,14 @@ print(resp.choices[0].message.content)
 ## Upgrade
 
 ```bash
-ainode update            # newest numeric tag
-ainode update 0.5.2      # or an explicit version
+ainode update              # newest numeric tag
+ainode update <version>    # or an explicit version
 ```
 
-`ainode update` resolves the **highest numeric GHCR tag** (or the version you name), pulls it, pins it into `~/.ainode/image.env`, and restarts the service — it never pulls a floating `:latest`. Your models, config, and training runs are never touched (the config dir is a bind mount).
+Run it **as the service user**, not through `sudo`. `ainode update` resolves the
+highest numeric GHCR tag (or the version you name), pulls it, pins it into the
+`image.env` the systemd unit reads, and restarts the service. It never pulls a
+floating `:latest`. Your models, config, and training runs are not touched (the
+config dir is a bind mount). Under `sudo` the wrapper resolves the unit's
+`AINODE_HOME` and refuses when it cannot tell; see
+[Updating AINode](/guides/update).
