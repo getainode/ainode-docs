@@ -7,7 +7,10 @@ icon: "rotate"
 A restart of the orchestrator does not touch the engine containers. They are
 siblings spawned through `docker.sock`, so after a `systemctl restart ainode` or
 an `ainode update` the engine keeps serving while the new process has no record of
-it.
+it. Since 0.5.30 the new process **keeps** a head that is still serving rather
+than reloading it, the same way it keeps a primary or a stacked instance: see
+[A restart keeps its engines](/cluster/adoption) for the three gates and for what
+`ainode stop` now leaves running.
 
 On a distributed head that divergence used to be total: the launch was
 deliberately never written down, the `InstanceManager` started empty, and the
@@ -56,6 +59,13 @@ A live container on a stacked port that neither the manager nor `instances.json`
 knows about, which is what a crash between a launch and the manifest write leaves
 behind, is adopted the same way **and written back into the manifest**, so the
 next restart replays it.
+
+<Warning>
+That repair only reaches a boot that did not go through `ainode start`. On a normal
+service start the boot decision keeps only stacked containers the manifest names, and
+the sweep removes the rest before adoption proper runs, so an unrecorded stacked
+container is freed rather than repaired.
+</Warning>
 
 ### A member adopts nothing
 
@@ -122,10 +132,12 @@ Loading a **different** model beside the head still stacks.
 ## `ainode update` on a head, step by step
 
 1. The roll restarts every container.
-2. `ainode start` sweeps every engine container this node owns.
-3. The boot engine relaunches the head from `config.json`, reaching the peers over
-   ssh.
-4. Adoption finds that container and puts it in the manager with its real shape.
+2. `ainode start` asks which engine containers to KEEP before it sweeps anything.
+   A head that is running, matches the configured recipe and is answering is kept,
+   and the sweep skips it.
+3. Anything not kept is swept, and the boot engine relaunches the head from
+   `config.json`, reaching the peers over ssh.
+4. Adoption puts the container in the manager with its real shape, kept or fresh.
 
 If the head container is gone when the process comes up, the record decides:
 peers answer, it relaunches once; a peer does not, it goes degraded and says so.

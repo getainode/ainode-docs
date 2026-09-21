@@ -34,14 +34,40 @@ The installer:
    skips this; the first model launch pulls it instead.
 3. Writes `~/.ainode/config.json`: `engine_backend: "nvidia"`, `model: null`,
    `onboarded: true`, `gpu_memory_utilization: 0.6`, `discovery_port: 5679`,
-   `cluster_id: "ainode-cluster"`, and the node's role.
-4. Writes `/etc/systemd/system/ainode.service` (or
-   `~/.config/systemd/user/ainode.service` with `--user`) and the
-   `/usr/local/bin/ainode` host wrapper.
-5. Starts the service.
+   `cluster_id: "ainode-cluster"`, a generated `cluster_secret`, and the node's
+   role. Mode 0600.
+4. **Mints one API key**, stores its SHA-256 in `~/.ainode/auth.json` with auth
+   switched on, and prints the key once in a box at the end. See below.
+5. Writes `/etc/systemd/system/ainode.service` (or
+   `~/.config/systemd/user/ainode.service` with `--user`), the
+   `/usr/local/bin/ainode` host wrapper, and the `ainode-tls-renew.timer` that
+   keeps a tailnet certificate fresh if you ever enable one.
+6. Starts the service.
 
 `--dry-run` renders the config, the unit and the wrapper into `~/.ainode` and
 stops: no pulls, no systemd, no docker.
+
+## Copy the key
+
+The last thing the installer prints is the one thing not to scroll past:
+
+```
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      YOUR API KEY. SHOWN ONCE, STORED HASHED. COPY IT NOW.
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+Only the SHA-256 is stored, so the key cannot be shown again: mint another with
+`ainode auth key create --name <client>`. The dashboard asks for it on first open
+and then remembers it. To install an **open** node instead, on a LAN you trust:
+
+```bash
+AINODE_AUTH=off curl -fsSL https://ainode.dev/install | bash
+```
+
+An install over an existing `~/.ainode/config.json` changes neither the auth state
+nor the keys, so an update never turns auth on under a running fleet. See
+[API keys](/security/api-keys).
 
 ## Open the UI
 
@@ -59,7 +85,7 @@ catalog entries that have been measured on this hardware are listed on
 ## API
 
 ```bash
-curl http://localhost:3000/v1/models
+curl -H "Authorization: Bearer <your ainode key>" http://localhost:3000/v1/models
 ```
 
 The API is OpenAI-compatible. Point any OpenAI client at
@@ -71,7 +97,7 @@ drops. Port `8000` is the raw primary vLLM engine container on this one node
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:3000/v1", api_key="not-needed")
+client = OpenAI(base_url="http://localhost:3000/v1", api_key="<your ainode key>")
 resp = client.chat.completions.create(
     model="ornith-ai/Ornith-1.5-35B-A3B-NVFP4",   # the id as served, or a served_model_name alias
     messages=[{"role": "user", "content": "Hello!"}],

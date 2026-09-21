@@ -49,6 +49,12 @@ by the time the limiter runs, so two people behind one NAT are two clients when
 they hold different keys, and one person with one key is one client from five
 machines.
 
+<Note>
+A request presenting the cluster's [fleet key](/security/api-keys) is stamped with
+the key id `fleet`, so every peer would share one bucket. In practice nothing
+collides: node-to-node calls are all on `/api`, which is exempt below.
+</Note>
+
 <Warning>
 `X-Forwarded-For` is deliberately ignored. It is caller-supplied, so a limiter
 keyed on it is a limiter anybody bypasses by varying the header. Behind a

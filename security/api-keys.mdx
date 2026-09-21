@@ -1,88 +1,212 @@
 ---
 title: "API keys"
-description: "Require a key on /api and /v1, from the dashboard or the CLI, without locking yourself out of your own node."
+description: "A fresh install mints a key and requires it. How to manage keys, how peers authenticate without one, and the paths that stay open."
 icon: "key"
 ---
 
-API key auth is **off by default**, which is what a private network wants and
-what the fleet runs. A node with no key set answers every request on port 3000,
-and the dashboard header says so in as many words: **API open, no key set**.
+**A fresh install requires an API key.** The installer mints one, stores its
+SHA-256 in `<AINODE_HOME>/auth.json`, turns auth on, and prints the key once in a
+box at the end of the install. The summary line reads **API protected, one key. It
+is printed below, once.**
+
+That is new in 0.5.30. Before it, a node shipped open, because auth used to break
+the product in two ways: the dashboard could not send a key, and a node with auth
+on could not talk to its own peers. Both are fixed, so the default flipped.
 
 <Warning>
-An unauthenticated port 3000 is a port that can load models, launch training
-jobs, patch config and read the node's logs. Do not expose one to the internet.
+The key **is** the access control. AINode serves the dashboard, the
+OpenAI-compatible API and every management route (load a model, unload one,
+`PATCH` the config, read the logs) on the same port, so a node answering without a
+key answers everyone who can reach it.
 </Warning>
 
-## Turn it on from the dashboard
+## What the installer does
 
-**Config, API access** is the whole story in one panel: whether this port wants
-a key, the switch that turns it on, the key shown once when it is minted, the
-keys that exist with a **Revoke** on each, and a box to paste a key into on a
-fresh browser.
+| Situation | What happens |
+|---|---|
+| Fresh install, default | Mints one key, writes `auth.json` with `enabled: true` mode **0600**, prints the key once. The key is 32 hex characters, its id 8, and the entry is named `installer` |
+| Fresh install, `AINODE_AUTH=off` | Leaves the node open and says so: *API access: OPEN, because you asked for it with AINODE_AUTH=off*, followed by what that means and `ainode auth enable` to change it |
+| Install over an existing `config.json` or `auth.json` | **Changes neither the auth state nor the keys**, whatever `AINODE_AUTH` says: *API access: left exactly as it is (this is not a fresh install)*. So no update turns auth on under a running fleet, with a key nobody saw |
+| No `sha256sum`, `shasum` or `openssl` on the host | Leaves the node open with a warning rather than writing a key it cannot store hashed |
+
+`AINODE_AUTH` takes `on` (the default) or `off`. Any other value stops the
+installer with exit code 2.
+
+```bash
+# Protected, which is the default
+curl -fsSL https://ainode.dev/install | bash
+
+# Open, deliberately
+AINODE_AUTH=off curl -fsSL https://ainode.dev/install | bash
+```
+
+The box at the end of the install is the only place the key exists in the clear:
+
+```
+      Key id:     1a2b3c4d  (name: installer)
+      Dashboard:  http://localhost:3000 asks for it on first open
+                  (Config > API access), then remembers it.
+      curl:       -H "Authorization: Bearer <key>"
+      Another:    ainode auth key create --name <client>
+      No key:     ainode auth disable   (the API answers everyone)
+```
+
+## Peers need no key of their own
+
+A cluster with auth on used to be a cluster that could not talk to itself: the
+load and unload fan-outs, `update-all`, the model card's read of a peer's config
+and the bench's node reads all answered 401. The credential between nodes is now
+**derived from the cluster's shared secret**:
+
+```
+fleet key = HMAC-SHA256(cluster_secret, "ainode-fleet-key-v1")
+```
+
+It travels as `Authorization: Bearer <fleet key>` on every node-to-node request
+(64 lowercase hex characters, in the same header slot as an operator key), and the
+middleware accepts it as the caller id **`fleet`**. Three properties come
+out of that one line (`ainode/auth/fleet.py`):
+
+- **Every node holding the secret computes the same key**, so
+  [`ainode join`](/cluster/joining) is all a new node needs. `POST /api/cluster/join`
+  hands the joiner the `cluster_secret`, and from that moment it is authenticated
+  to every node in the cluster. There is no key to copy and no route that hands out
+  credentials.
+- **Rotation follows the secret.** On a node with clustering on it is read live
+  per request through the same `ClusterSecret` that discovery signing uses, so
+  rolling `cluster_secret` rolls the fleet's access at the same moment, on the same
+  nodes, with no restart. (With clustering switched off there is no live reader
+  installed, so the value read at boot stands until a restart. That node has no
+  peers to authenticate anyway.)
+- **Nothing new on disk.** `auth.json` keeps exactly the operator keys it had.
+
+The label is a constant so that the fleet key is not the secret itself. The same
+value signs discovery datagrams, and one value used unchanged as both a signing
+key and a bearer token would mean anything that reads an HTTP header (a proxy log,
+a crash report) has learned the key the cluster's UDP wire trusts.
+
+<Note>
+**Engine ports do not carry it.** The inference proxy, the capability probes and
+the embeddings route talk straight to a vLLM container, which AINode's middleware
+never sees. A node with no `cluster_secret` has no fleet key at all: it neither
+sends nor accepts one, rather than accepting an empty token.
+</Note>
+
+The caller id `fleet` has no entry in `auth.json` and cannot be revoked from the
+dashboard. Revoking the fleet's access to a node means changing that node's
+`cluster_secret`, which is the same act as removing it from the cluster.
+
+## Manage keys from the CLI
+
+```bash
+ainode auth enable                       # require a key, minting a first one if there is none
+ainode auth disable                      # stop requiring one; the keys stay on the node
+ainode auth status                       # is it on, how many keys, and can peers still call
+ainode auth key create --name <client>   # mint a key for one client, printed once
+ainode auth key list                     # which client holds which key, and when
+ainode auth key revoke <id>              # take one away
+```
+
+**Every one of those is live.** The server stats `auth.json` per request and
+re-reads it when it changes, so each command that changes something prints:
+
+```
+  In effect now: the running node re-reads auth.json, no restart needed.
+```
+
+`enable`, `disable`, `key create`, `key revoke` and `new-key` print it; `status`
+and `key list` change nothing, so they do not. That replaces the old behaviour,
+where the server held whatever the file said at startup, `ainode auth enable`
+appeared to do nothing, and the fix was a restart nobody was told to do.
+
+`ainode auth key list` prints a table of **ID**, **Name** and **Created**, which
+is the point of naming a key: a list of eight-character hex ids is not a list an
+operator can revoke from with any confidence about what they are switching off. A
+revoke names a key **by id, never by name**, because two clients may share a name.
+
+Revoking the last key on a node that still requires one is called out rather than
+done quietly:
+
+```
+  That was the last key, and this node still requires one. Nothing can call it
+  until you run: ainode auth key create --name <client>
+```
+
+`ainode auth new-key` still works and is the same act without a name on it.
+
+<Note>
+The reload is deliberately conservative in both directions. A file that cannot be
+stat'ed or parsed leaves the state alone: a half-written document or a deleted
+file must never be the thing that drops a node's access control.
+</Note>
+
+## Manage keys from the dashboard
+
+**Config, API access** is the whole story in one panel: whether this port wants a
+key, the switch that turns it on, the key shown once when it is minted, the keys
+that exist with a **Revoke** on each, and a box to paste a key into on a fresh
+browser.
 
 The browser that flips the switch stores the new key itself, so the click that
-enables auth cannot lock the operator out. That is the bug this replaced: every
-request the UI made used to travel with no `Authorization` header at all, so
-`ainode auth enable` left the shell rendering and every panel behind it 401ing,
-and the only way back was `ainode auth disable` on the box.
-
-Every request from `app.js`, `bench.js` and the dashboard's own pages now goes
-through one wrapper (`web/static/js/auth.js`) that attaches the key when one is
-stored, keeps it in `localStorage` under `ainode.apiKey`, and reports a 401
-exactly once per poll cycle to the one handler that opens the panel.
+enables auth cannot lock the operator out. Every request from `app.js`, `bench.js`
+and the dashboard's own pages goes through one wrapper
+(`web/static/js/auth.js`) that attaches the key when one is stored, keeps it in
+`localStorage` under `ainode.apiKey`, and reports a 401 exactly once per poll
+cycle to the one handler that opens the panel.
 
 The header chip reads its state from `GET /api/auth/status` and is one click from
 the panel that changes it.
 
-## Turn it on from the CLI
+## Keys are shown once, and the file is 0600
 
-```bash
-ainode auth enable      # turn it on, minting a first key if there is none
-ainode auth status      # is it on, and how many keys exist
-ainode auth new-key     # mint another key
-ainode auth disable     # turn it off; all requests allowed again
-```
-
-`ainode auth enable` prints the key and its id **only for a key it just
-minted**. On a node that already has one it says so instead:
-
-```
-Using the 1 key(s) this node already has (stored hashed, so not shown again).
-Lost it? ainode auth new-key
-```
-
-There is no `ainode auth list` and no `ainode auth revoke`. Listing and revoking
-are the dashboard panel and HTTP only.
-
-<Warning>
-**The CLI subcommands need a restart to take effect.** The server reads
-`auth.json` once when the app is built and nothing re-reads it, so
-`ainode auth enable`, `ainode auth disable` and `ainode auth new-key` change the
-file but not the running node until:
-
-```bash
-sudo systemctl restart ainode
-```
-
-The dashboard panel and the `/api/auth/*` routes mutate the live object, so they
-take effect immediately. Prefer the dashboard on a node that is serving.
-</Warning>
-
-## Keys are shown once
-
-`<AINODE_HOME>/auth.json` stores, per key, an `id` and a **SHA-256 hash** of the
-key:
+`<AINODE_HOME>/auth.json` stores, per key, an `id`, a **SHA-256 hash** of the key,
+the `name` it was minted for and when:
 
 ```json
-{"enabled": true, "api_keys": [{"id": "1a2b3c4d", "key_hash": "<sha256 hex>"}]}
+{
+  "enabled": true,
+  "api_keys": [
+    {"id": "1a2b3c4d", "key_hash": "<sha256 hex>", "name": "laptop",
+     "created_at": "2026-09-20T22:14:03Z"}
+  ]
+}
 ```
+
+`name` and `created_at` are optional on read, because a key minted before 0.5.30
+has neither and must keep working.
 
 The plaintext is never written anywhere, so a key that has been minted cannot be
 shown again: mint a new one instead. A key is 32 hex characters; its id is 8.
 
-Validation is a constant-time compare against every stored hash, and the id of
-the key that matched is stamped on the request, which is how the
-[rate limiter](/security/rate-limits) gives each key its own budget.
+**`auth.json` and `config.json` are written 0600 and atomically**: a temp file
+written 0600, then renamed, so a reader never sees half a document. An existing
+wider file is **tightened on load**, and `auth.json` says so in the log when it
+tightens one. `config.json` carries `cluster_secret` and may carry `hf_token`,
+which is why its mode matters as much as the key store's.
+
+<Note>
+One writer is the exception. The join merge (`ainode join`, `ainode cluster token`
+when it has to generate a secret, and `POST /api/cluster/join-self`) writes
+`config.json` atomically but sets no mode, so the file carries the process umask
+until the next load tightens it. `ainode join` restarts the service immediately
+afterwards, which closes that window; the other two do not.
+</Note>
+
+Validation is a constant-time compare against every stored hash, and the id of the
+key that matched is stamped on the request, which is how the
+[rate limiter](/security/rate-limits) gives each key its own budget. A request
+presenting the fleet key is stamped `fleet` by the same pass.
+
+## A credential never comes back out
+
+`GET /api/config` **omits** `cluster_secret` and `hf_token` entirely. Only the
+first used to be scrubbed, so a Hugging Face credential that can write to the
+operator's own repositories came back in clear to any caller, and on an open node
+to anyone who could reach the port.
+
+Presence is answerable without the value: `ainode config` prints
+**`set (hidden)`**, and `ainode doctor`'s `credentials.hf_token` check reports
+which sources hold one.
 
 ## Using a key
 
@@ -114,7 +238,7 @@ five exceptions and the static shell, each with a reason:
 | Path | Why it stays open |
 |---|---|
 | `/` and `/static/*` | The shell is files. Without it the browser cannot render the page that asks for a key |
-| `GET /api/health` | A liveness probe has no key |
+| `GET /api/health` | A liveness probe has no key. It carries the running `version`, which is what `ainode update` reads to verify a release on a node that requires one |
 | `GET /api/auth/status` | So the UI can say "this node wants a key" instead of rendering an empty page |
 | `GET /api/cluster/endpoint` | Node names, addresses and ports, nothing else. A client whose configured node is down has to be able to ask a reachable one where the rest of the fleet is, and the key it holds does not help it find an address. No model, no telemetry, no config, no key material |
 | `POST /api/cluster/join` | A node joining this cluster does not hold this cluster's key yet, so a single-use expiring [join token](/cluster/joining) is the credential instead. The route is rate limited to five attempts a minute per source address in place of a key |
@@ -125,14 +249,6 @@ exempt, and neither is `/metrics`.
 That one rule covers every mutating route rather than a list that can drift, and
 `tests/test_auth_gate.py` walks the real route table and fails on any route
 reachable without a key that is not one of those.
-
-<Note>
-The browser onboarding wizard used to be a sixth exemption, open while
-`config.onboarded` was false. It was removed in 0.5.29: it was unreachable on
-every deployed node, because the installer and every non-TTY start set
-`onboarded` before the server came up, and it never joined a cluster even when
-reached.
-</Note>
 
 ## `trust_remote_code` needs a key even when auth is off
 
@@ -177,6 +293,20 @@ The dashboard header chip, the installer's summary line and `ainode auth status`
 all print those same words, from one place in the code, so they cannot end up
 saying three different things.
 
+## What `ainode doctor` says
+
+Two checks cover this surface. See [Doctor](/ops/doctor) for the rest of the
+report.
+
+| Check | Verdict |
+|---|---|
+| `auth.state` | **FAIL** when auth is on and the node has peers but no `cluster_secret`: every node-to-node call in this cluster answers 401, so the cluster is already broken rather than at risk. The fix line is the join command. **WARN** when no key is required and the API is bound to something other than loopback: anyone who can reach the host can load models, unload them and change the config. **OK** when a key is required, and also when no key is required but the API is bound to loopback so nothing off the host can reach it. A store that cannot be read is a WARN naming the file |
+| `cluster.secret` | **WARN** when there is no `cluster_secret` at all: discovery is then unauthenticated, so any host on the broadcast domain can announce itself into this cluster, and peers cannot authenticate to this node either. **OK** when one is set |
+
+`auth.state` is where the broken combination lands, which is why `cluster.secret`
+is only ever a WARN: the whole fleet ran without a secret once, and a check that
+failed every node is a check nobody reads.
+
 ## HTTP routes
 
 | Method | Path | Answers |
@@ -184,20 +314,41 @@ saying three different things.
 | GET | `/api/auth/status` | `{enabled, key_count, authenticated}`. Never a key or a hash. Answers without a key |
 | POST | `/api/auth/enable` | `{enabled: true, key_id, api_key, key_count}`. `api_key` is `null` (with a `message`) when the node already had a key |
 | POST | `/api/auth/disable` | `{enabled: false, key_count}` |
-| GET | `/api/auth/keys` | `{enabled, key_count, keys: [{id}]}` |
-| POST | `/api/auth/keys` | `{api_key, key_id, key_count}`. The value comes back once |
+| GET | `/api/auth/keys` | `{enabled, key_count, keys: [{id, name, created_at}]}` |
+| POST | `/api/auth/keys` | Body takes an optional `name`. Answers `{api_key, key_id, name, key_count}`. The value comes back once |
 | DELETE | `/api/auth/keys/{key_id}` | `{revoked: true, key_id, key_count}`. An unknown id is a **404** with `Key '<id>' not found` |
 
 ## The bench view, and why downloads still work
 
 Two things a header cannot travel on are the bench report iframe and its JSON
 download links. Both are fetched through the auth wrapper and handed to the
-browser as a blob rather than an `href`, so the bench view keeps working with
-auth on.
+browser as a blob rather than an `href`, so the bench view keeps working with auth
+on.
 
-## Known gap: the desktop app
+The terminal bench takes a key too: `scripts/ainode-bench.py --api-key <key>`, or
+`AINODE_API_KEY` in the environment. See [Bench API](/api-reference/bench).
 
-[AINode Desktop](/desktop) has no field for an API key and has never sent one, so
-a node with auth enabled cannot be polled by it at all. `/api/cluster/endpoint`
-needs no key, so the app can still learn the fleet's addresses from such a node,
-but `/api/status` answers 401. See [Desktop app](/desktop).
+## The shape a protected fleet takes
+
+Nothing here is required, and a node on a trusted LAN can reasonably run with less.
+This is what every piece above adds up to when they are all turned on:
+
+| Piece | What it gives you |
+|---|---|
+| **A key on every node**, minted per client with `ainode auth key create --name` | Nothing reaches `/api` or `/v1` without a credential you issued, and `key list` says who holds what |
+| **One `cluster_secret` across the fleet**, distributed by [`ainode join`](/cluster/joining) | Every node authenticates to every other node with the derived fleet key, and discovery is signed at the same time. Rotating it rotates both |
+| **[TLS](/security/tls) on its own port**, from `ainode tls enable --tailscale`, with the renewal timer | The key stops travelling in clear text, and clients read the scheme off `/api/cluster/endpoint` rather than being told |
+| **[Rate limits](/security/rate-limits)** on `/v1` | One caller cannot hold every engine in the cluster |
+| **`ainode doctor`** on each node | `auth.state`, `cluster.secret`, `tls.enabled` and `ratelimit.state` are the four lines that say whether the above is actually in force |
+
+The combination that is broken rather than merely unprotected is **auth on with
+peers and no `cluster_secret`**: that node answers 401 to its own cluster. It is the
+one FAIL in this area, and `ainode doctor` names the join command that fixes it.
+
+## Clients
+
+[AINode Desktop](/desktop) 0.2.0 has an optional API key setting, so a protected
+node can be polled by it. Keys are per node: a key minted on one node is not a key
+another node accepts, so an app pointed at a fleet with auth on needs a key every
+node in it accepts. That is tracked as
+[issue 252](https://github.com/getainode/ainode/issues/252).

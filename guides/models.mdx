@@ -150,7 +150,7 @@ nothing behind it; "verified" is what a user reads to decide whether a recipe wi
 come up on their hardware, so an entry nobody can check is worse than an honest
 unverified one. They now say `verified: false`.
 
-### The 10 verified entries
+### The 11 verified entries
 
 | Entry | Width | Proven |
 |---|---|---|
@@ -164,10 +164,11 @@ unverified one. They now say `verified: false`.
 | DeepSeek V4 Flash (DSpark, FP8) | TP=2 | 2026-09-16 |
 | Qwen3.8-Flash-Next (NVFP4) | TP=2 | 2026-09-16 |
 | Qwen3-235B-A22B (NVFP4) | TP=4 | 2026-06-17 |
+| Whisper Large v3 Turbo | TP=1, stacked | 2026-09-21 |
 
-The other **13** entries have no record, including the Llama, MiniMax and GLM
-entries, both 405B entries and Whisper. They are in the catalog as a recipe or a
-size reference, not as something proven here. The full measured picture is on
+The other **12** entries have no record, including the Llama, MiniMax and GLM
+entries and both 405B entries. They are in the catalog as a recipe or a size
+reference, not as something proven here. The full measured picture is on
 [Tested Models](/guides/tested-models).
 
 ## The V100 lanes
@@ -246,12 +247,31 @@ LAUNCH works on a node that has never built anything. Its tag is the **base engi
 image's** tag rather than an AINode version, because the image tracks the engine
 it derives from and an AINode release does not rebuild it.
 
+### It is verified now, with a record
+
+The entry carries `verified: true` since 0.5.30, and the record it names is a
+speech bench run rather than a claim. Measured on Spark-4 (an ASUS GX10) on
+2026-09-21, stacked at `0.06` beside Nemotron 3.5 Lightning at `0.62` and the
+embedder at `0.06`, so all three shared one GB10:
+
+| Measurement | Result |
+|---|---|
+| Ready | 110 seconds, which the entry carries as `typical_ready_minutes: 2.0` |
+| Word error rate | 2.3 percent over 10 clips in 6 voices and 6 English locales, 4.6 percent orthographic |
+| Word for word | 8 of the 10 clips |
+| Latency | 739 ms median per clip, through the fleet endpoint |
+| Real-time factor | 0.18, so it transcribes about five times faster than the audio plays |
+
+The record is
+[`20260921-012724-whisper-large-v3-turbo-spark-4-stacked-beside-nemotron-at-0_62-via-the-fleet-endpoint-speech.json`](https://github.com/getainode/ainode/blob/main/bench/results/20260921-012724-whisper-large-v3-turbo-spark-4-stacked-beside-nemotron-at-0_62-via-the-fleet-endpoint-speech.json),
+and the numbers are on [Tested Models](/guides/tested-models).
+
 <Warning>
-**This entry is `verified: false`**, and deliberately not dressed up as anything
-else: the engine has not served on this hardware yet. Both nodes with room to
-stack were full when it was tried (2026-09-19: CUDA out of memory at context
-creation on a node with 3 GB free). A `verified: true` flip needs a bench record
-to name, which needs a speech section in the bench. Both are follow-ups.
+**Warm the engine before pointing a user at it.** On `--enforce-eager` the first
+transcription after a launch compiles the kernels. Measured by hand on Spark-4 it
+took **89 seconds**, against 0.7 for every one after it. The speech bench takes one
+untimed warm-up request for exactly this reason and records it rather than hiding
+it, so a cold engine cannot quietly become a latency number.
 </Warning>
 
 Turbo is a **transcription** model and cannot translate; vLLM's own note says so.

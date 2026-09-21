@@ -21,7 +21,7 @@ Everything else is untested, and this page says so out loud. Absence of a model
 here is not a claim that it fails; it is a claim that we have not measured it.
 
 <Note>
-The five tables below are generated from those JSON files by
+The six tables below are generated from those JSON files by
 `scripts/render-bench-table.py` in the product repo, so the page cannot drift
 from the data. A measurement nobody took renders as **not measured** rather
 than as a zero or a guess. If a table here lags the README in the product repo,
@@ -34,6 +34,7 @@ the README is newer.
 
 | Model | Params / active | Quant | Placement | Single-stream tok/s | 16 streams tok/s | Rubric | Date | Run |
 |---|---|---|---|---|---|---|---|---|
+| Qwen3.8-Flash-Next | 125B / 6B active | NVFP4 (mixed, FP8 PLE) | castor, 4× Tesla PG500-216, TP=4 | 49.6 | 104.2 | not run | 2026-09-20 | [AINode 0.5.29, castor TP=4 four V100 32 GB, onecat-vllm 1.5.0-mm, MTP 4, via the fleet endpoint](https://github.com/getainode/ainode/blob/main/bench/results/20260920-122006-qwen3_8-flash-next-nvfp4-v100-ainode-0_5_29-castor-tp-4-four-v100-32-gb-onecat-vllm-1_5_0-mm-mtp-4-via-the-fleet-endpoint.json) |
 | Qwen3.6 35B-A3B | 35B / 3B active | NVFP4 | pollux, 1× Tesla PG500-216, TP=1 | 97.4 | 343.9 | not run | 2026-09-19 | [Pollux V100 solo, onecat src-full](https://github.com/getainode/ainode/blob/main/bench/results/20260919-040456-qwen3_6-35b-a3b-nvfp4-pollux-v100-solo-onecat-src-full.json) |
 | Spark-X2.5 4B | 4B dense | BF16 | Spark-4-GX10, 1× GB10, TP=1 (stacked) | 18.9 | 283.8 | not run | 2026-09-18 | [Spark-4 stacked beside Nemotron, BF16](https://github.com/getainode/ainode/blob/main/bench/results/20260918-155217-spark-x2_5-4b-spark-4-stacked-beside-nemotron-bf16.json) |
 | Qwen3.8-Flash-Next (NVFP4) | 125B / 6B active | NVFP4 (mixed, FP8 PLE) | Spark-2-DGX, 2× GB10, TP=2 | 26.2 | 207.6 | not run | 2026-09-16 | [AINode 0.5.18, TP=2 Spark-2+3, vLLM nightly, no MTP](https://github.com/getainode/ainode/blob/main/bench/results/20260916-204216-qwen3_8-flash-next-nvfp4-tp2-mp-nightly.json) |
@@ -133,6 +134,7 @@ column is the largest prompt size whose needle came back verbatim.
 | Ornith 1.5 35B-A3B | Spark-1-DGX, TP=1 | 24/25 | 9/9 | 3/3 | 4/4 | 100k | 2026-09-18 | [Ornith stacked Spark-1, thinking on](https://github.com/getainode/ainode/blob/main/bench/results/20260918-013703-ornith-1_5-35b-a3b-nvfp4-ornith-stacked-spark-1-thinking-on-agentic.json) |
 | Qwen3.6 35B-A3B | pollux, TP=1 | 20/22 | 9/9 | 3/3 | 3/4 | 8k | 2026-09-19 | [Pollux V100 solo, quick](https://github.com/getainode/ainode/blob/main/bench/results/20260919-040711-qwen3_6-35b-a3b-nvfp4-pollux-v100-solo-quick-agentic.json) |
 | Qwen3.8 27B | Spark-1-DGX, TP=1 | 24/25 | 9/9 | 2/3 | 4/4 | 100k | 2026-09-18 | [Qwen3.8 27B solo Spark-1, thinking on](https://github.com/getainode/ainode/blob/main/bench/results/20260918-020831-qwen3_8-27b-nvfp4-qwen3_8-27b-solo-spark-1-thinking-on-agentic.json) |
+| Qwen3.8-Flash-Next | castor, TP=4 | 20/22 | 9/9 | 3/3 | 3/4 | 8k | 2026-09-20 | [castor TP=4 four V100, onecat-vllm 1.5.0-mm, MTP 4, quick rubric via the fleet endpoint](https://github.com/getainode/ainode/blob/main/bench/results/20260920-122230-qwen3_8-flash-next-nvfp4-v100-castor-tp-4-four-v100-onecat-vllm-1_5_0-mm-mtp-4-quick-rubric-via-the-fleet-endpoint-agentic.json) |
 | Spark-X2.5 4B | Spark-4-GX10, TP=1 | 19/25 | 9/9 | 1/3 | 4/4 | 48k | 2026-09-18 | [Spark-4 stacked beside Nemotron, first run](https://github.com/getainode/ainode/blob/main/bench/results/20260918-151444-spark-x2_5-4b-spark-4-stacked-beside-nemotron-first-run-agentic.json) |
 
 {/* END agentic-bench-table */}
@@ -174,21 +176,69 @@ leaderboard.
 
 {/* END embed-bench-table */}
 
+## Speech runs
+
+A transcription model writes no tokens: audio goes in, and what comes back is
+scored against words nobody typed at it. It is served the way every other model
+here is, by vLLM on the engine image its catalog recipe pins, so it stacks beside
+a chat model on one GPU and `POST /v1/audio/transcriptions` on any node routes to
+it by the model id in the multipart body.
+
+**WER** is the word error rate against the exact text the clips were made from,
+**pooled over words** rather than averaged over clips. It folds number words to
+digits, so a transcript that heard every word and wrote "9" for "nine" is not
+called wrong for its spelling. The bracketed rate beside it is the **orthographic**
+one, which folds only case, punctuation and whitespace, and is the mean of the
+per-clip rates rather than a pooled figure. The gap between them is how much of the
+error was spelling rather than hearing. **Exact** counts the clips that came back
+word for word. **p50 ms** is one clip uploaded on its own, end to end from wherever
+the bench ran, and **RTF** is the real-time factor, wall seconds per second of
+audio, so below 1 means the engine transcribes faster than the clip plays.
+
+The audio is ten committed WAVs in
+[`bench/speech/clips/`](https://github.com/getainode/ainode/tree/main/bench/speech/clips),
+six voices across six English locales, every line carrying digits and most a place
+or product name, because a wrong number and a wrong name are where transcription
+goes wrong in a way a user notices. A word error rate is only comparable over the
+same bytes, so the clips are committed rather than fetched, and the reference is
+the exact text they were generated from rather than anything transcribed by hand.
+
+{/* BEGIN speech-bench-table */}
+
+| Model | Placement | Clips | WER | Exact | p50 ms | RTF | Date | Run |
+|---|---|---|---|---|---|---|---|---|
+| Whisper Large v3 Turbo | Spark-4-GX10, TP=1 | 10 | 2.3% (4.6% raw) | 8 of 10 | 739 | 0.181 | 2026-09-21 | [Spark-4 stacked beside Nemotron at 0.62, via the fleet endpoint](https://github.com/getainode/ainode/blob/main/bench/results/20260921-012724-whisper-large-v3-turbo-spark-4-stacked-beside-nemotron-at-0_62-via-the-fleet-endpoint-speech.json) |
+
+{/* END speech-bench-table */}
+
+<Note>
+The first transcription after a launch compiles the engine's kernels, so the run
+takes one untimed warm-up request before it measures anything, and records it in
+the run's own `warmup` block rather than hiding it. Measured by hand on Spark-4,
+that first request on `--enforce-eager` took **89 seconds** against 0.7 for every
+one after it. The published record's warm-up is fast because that engine had
+already been warmed before the bench ran, so read the 89 seconds as the cold
+number and the record's as a warm one.
+</Note>
+
 ## What is tested
 
 - **Single-node MoE through the AINode launch path**, on a DGX Spark and an
   ASUS GX10, including a concurrency sweep to 16 streams and a full rubric.
 - **Single-node dense**, with and without MTP speculative decode.
-- **A Tesla V100** (Dell C4130) serving through the catalog, solo.
+- **Tesla V100s** (Dell C4130) serving through the catalog: one card solo on
+  pollux, and four cards at TP=4 in one chassis on castor.
 - **Model stacking**: two engines on one node, both routed by model id through
   the one AINode API endpoint; the embedding model is a stacked pooling engine.
 - **Decode over context depth**, from 4K to 120K prompt tokens, with a unique
   nonce per request so prefix caching cannot make long context look free.
 - **Two-node TP=2 through the current launch path** (DeepSeek V4 Flash,
-  Qwen3.8-Flash-Next), and **four-node TP=4** measured June 2026 on 0.4.x.
+  Qwen3.8-Flash-Next), **TP=4 across four cards in one node** (castor), and
+  **four-node TP=4** measured June 2026 on 0.4.x.
 - **Correctness separately from speed**: the rubric, the coding harness runs,
   and the agentic rubric.
-- **Typed decisions** and **embeddings**, each with its own bench section.
+- **Typed decisions**, **embeddings** and **speech to text**, each with its own
+  bench section.
 
 ## What is not tested yet
 
@@ -201,11 +251,13 @@ us the record.
   `--limit-mm-per-prompt {"image":0,"video":0}` because the API server's
   multimodal warmup OOM-killed the engine core on a node with roughly 35 GB free.
   No vision numbers, no vision rubric.
-- **TP=4 through the current launch path.** The 235B row was measured on 0.4.x
-  with the `scitrera/dgx-spark-vllm` image. It has not been re-run on a 0.5.x
-  release, and it has no concurrency sweep, no sustained number and no rubric.
-- **The C4130's other GPUs.** The V100 row is one GPU of the four in that
-  chassis, solo.
+- **Four-node TP=4 through the current launch path.** The 235B row was measured
+  on 0.4.x with the `scitrera/dgx-spark-vllm` image. It has not been re-run on a
+  0.5.x release, and it has no concurrency sweep, no sustained number and no
+  rubric. Four cards at TP=4 inside one node have been measured, on castor; four
+  nodes have not.
+- **Pollux's other GPUs.** Its V100 row is one card of the four in that chassis,
+  solo. Castor is the chassis whose four cards are measured together.
 - **GLM-5.3-Flash at TP=2.** That Spark pair ran it raw, outside AINode, so there
   is no AINode-launched measurement for it.
 - **DeepSeek V4.1 Flash.** Not launched through AINode. V4 Flash is in the table
@@ -251,8 +303,25 @@ python3 scripts/ainode-bench.py --show bench/results/<file>.json
 `--depths` and `--streams` set the sweep points. The subcommands measure the
 other sections: `ainode-bench harness` (a coding agent driving the model to
 passing tests), `ainode-bench agentic` (the agentic rubric), `ainode-bench decide`
-(the decision bench) and `ainode-bench embed` (the embedding bench). Each has
-`--help`. The record format is in
+(the decision bench), `ainode-bench embed` (the embedding bench) and
+`ainode-bench speech` (the speech bench). Each has `--help`.
+
+```bash
+# The speech bench, against a Whisper instance anywhere in the fleet
+python3 scripts/ainode-bench.py speech \
+    --endpoint http://<node-ip>:3000/v1 \
+    --ainode http://<node-ip>:3000 \
+    --model openai/whisper-large-v3-turbo \
+    --label "stacked beside a chat model"
+```
+
+`--translate` measures `/v1/audio/translations` instead, `--language` pins the
+language, and `--generate-clips` rebuilds the committed WAVs on a Mac, which is a
+maintenance step rather than part of a run.
+
+On a node that [requires an API key](/security/api-keys), every section takes
+`--api-key` or reads `AINODE_API_KEY`, and a 401 or a 429 stops the section before
+it scores anything. See [Bench API](/api-reference/bench). The record format is in
 [`bench/SCHEMA.md`](https://github.com/getainode/ainode/blob/main/bench/SCHEMA.md):
 one JSON file per run, named `<stamp>-<model-slug>-<label>.json`, where a run is
 one model on one placement (node, engine image, flags) on one day.

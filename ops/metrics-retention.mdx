@@ -92,6 +92,7 @@ Any series over any window.
 
 | Parameter | Meaning |
 |---|---|
+| `node` | A node id or node name. Absent, or this node's own, answers from this node's store; any other name is fetched from that node. See [Any node's charts](#any-nodes-charts-from-any-node) |
 | `series` | Comma-separated names, or the parameter repeated. Omitted means every series the store holds. Names are the flattened snapshot keys, for instance `gpu.temperature_c` or `requests.latency_ms.p95` |
 | `since` / `until` | A unix timestamp in seconds (milliseconds are accepted and divided, so a browser can pass `Date.now()`), or a relative offset from now with a leading minus and an optional unit: `-30m`, `-6h`, `-2d`. Units are `s`, `m`, `h`, `d`. Defaults are one hour ago and now |
 | `step` | Grid width in seconds, same optional unit suffix. Defaults to the sampling interval for raw data and one minute for roll-ups |
@@ -156,8 +157,91 @@ shapes are unchanged and deliberately so: they are what the dashboard, the
 discovery broadcast and every existing scrape read. The history route is additive.
 </Note>
 
-## The dashboard
+## Any node's charts, from any node
 
-The dashboard's metrics buffer is seeded from disk at page load, so a chart drawn
-over it opens on the node's real recent history instead of one point from the
-moment the page loaded.
+`node` is the one parameter that can leave this node:
+
+| Value | What answers |
+|---|---|
+| Absent, or this node's own id or name | This node's store |
+| Another node's id or name | That node is asked for **its own** history and the answer is passed through, so a peer's charts are that peer's measurements rather than anything a head inferred about it |
+
+```bash
+curl "http://localhost:3000/api/metrics/history?node=Spark-3-DGX&series=gpu.temperature_c&since=-6h"
+```
+
+Every response carries a `node` block saying whose measurements these are:
+
+```json
+{"node": {"node_id": "25033c02", "node_name": "Spark-2-DGX", "local": true}}
+```
+
+`local` is true of the node that measured them and false on a passed-through
+answer, which is the reader's point of view rather than the peer's.
+
+The forward carries the cluster's [fleet key](/security/api-keys), so it works on a
+fleet with auth on everywhere, and it times out after **6 seconds**. Every other
+query parameter is passed along unchanged; only `node` is stripped.
+
+A node that cannot be answered for is an **error naming it** rather than an empty
+chart:
+
+| Case | Status | Body |
+|---|---|---|
+| No node of that id or name in this cluster | **404** | `{"error": "no node named 'spark9' in this cluster", ...}` |
+| Known but with no usable address, or no HTTP session to ask with | **502** | The reason, naming the node |
+| Answered something other than a history | **502** | `<name> answered <status>`, or the peer's own error |
+| Did not answer in time | **502** | `<name> did not answer for its history` |
+
+Each of those still carries the `node` block, `"series": {}` and `"points": 0`, so a
+caller drawing a chart has a shape to render and a sentence to show.
+
+## The Metrics view
+
+The dashboard draws what a node has been keeping. **Six panels**, hand drawn on
+canvas with no charting library, theme-aware through the existing design tokens:
+
+| Panel | What it draws |
+|---|---|
+| **GPU memory** | In use against the total this node reports |
+| **GPU utilization** | Percent busy, averaged across the devices that answer |
+| **Temperature** | The hottest device on the node |
+| **Request rate** | Requests and errors per minute, from the counters this node keeps |
+| **Latency percentiles** | p50, p95 and p99 over the requests this node has timed |
+| **Process uptime** | Sawtooths to zero at a restart, which is how a gap in the panels above reads as one |
+
+Four ranges: **1 h**, **6 h**, **24 h** and **7 d**. The first reads raw samples on
+a 15 second grid and refreshes every 15 seconds; the others read the roll-ups and
+refresh every minute, or every five for 7 d. A status line says which it used:
+*raw samples, step 15s, 241 points*.
+
+**A node picker appears once the fleet has more than one node**, the local one
+labelled *(this node)*, and picking a peer draws that peer's own history through the
+route below. Under the grid, the store line says how far the history reaches back,
+the retention in force, the sampling interval and what it costs on disk. With
+retention off the view says so and names the config change.
+
+There is deliberately **no tokens per second panel**: the counter behind it is
+never incremented by anything in the product, so the panel would draw a flat zero
+reading "this node generated no tokens" when the truth is "nothing counts tokens".
+
+**A gap in the data is a gap in the line.** A null is a hole, not a point at the
+axis, and a counter's rate across a restart is absent rather than negative.
+
+**A series the node cannot measure is said in words**, under the panel, instead of
+being drawn as a zero:
+
+> This node reports no GPU utilization figure. On a unified memory part (GB10 /
+> DGX Spark) the driver exposes no utilization counter at all, so there is nothing
+> to draw: not zero, not idle, not measured. Memory and temperature above and below
+> are real.
+
+The same treatment covers an untimed latency panel ("an untimed percentile is
+absent here rather than drawn at zero, which would read as instant answers"), a
+request rate with nothing counted, and a node reporting no temperature.
+
+<Note>
+The dashboard's old in-memory metrics ring buffer is **gone**. It was seeded from
+the same history route these charts read and nothing ever drew it, and keeping a 20
+minute buffer beside a 48 hour store would have been two sources for one line.
+</Note>

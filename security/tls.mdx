@@ -1,6 +1,6 @@
 ---
 title: "TLS"
-description: "Serve HTTPS on a second port with a self-signed certificate, a pair you already have, or a real Let's Encrypt certificate on the tailnet."
+description: "Serve HTTPS on a second port: a real Let's Encrypt certificate for the node's tailnet name in one command, renewed by a timer, or a self-signed pair."
 icon: "lock"
 ---
 
@@ -12,9 +12,11 @@ at a time.
 ## Turn it on
 
 ```bash
-ainode tls enable          # generate a self-signed pair
-ainode tls status          # what is served, and when the certificate expires
-ainode tls disable         # stop serving HTTPS; the pair is kept
+ainode tls enable --tailscale   # a real Let's Encrypt certificate for this node's tailnet name
+ainode tls enable               # generate a self-signed pair
+ainode tls status               # what is served, and when the certificate expires
+ainode tls renew                # replace a tailnet certificate inside its last 14 days
+ainode tls disable              # stop serving HTTPS; the pair is kept
 ```
 
 `ainode tls enable` takes:
@@ -55,9 +57,160 @@ Two things stay HTTP regardless:
 8000 and 5679/udp, and the systemd unit runs with `--network=host`, so no port
 mapping is involved.
 
-## The three ways to get a certificate
+## Tailscale, for a real certificate
 
-### Self-signed (the default)
+```bash
+ainode tls enable --tailscale
+```
+
+This is the one shape that could not work before 0.5.30, and the reason is where
+the pieces live: `tailscale` runs on the **host**, and the CLI runs inside a
+container that ships no `tailscale` binary and has no path to the tailnet daemon
+socket. So the command is split, and the installer's wrapper at
+`/usr/local/bin/ainode` runs the host half:
+
+1. **The host** resolves this node's MagicDNS name from
+   `tailscale status --peers=false --json` (falling back to
+   `tailscale status --json` for an older tailscale), reading `Self.DNSName`.
+2. **The host** works out which `.ainode` the service actually reads, before
+   writing anything. A pair written into the wrong home is a node with TLS enabled
+   and no certificate, so it refuses rather than guess:
+   `sudo AINODE_HOME=/home/<user>/.ainode ainode tls enable --tailscale` names it.
+3. **The host** runs `tailscale cert` into `<AINODE_HOME>/tls/<name>.crt` and
+   `<AINODE_HOME>/tls/<name>.key`. The files are named after the certificate's one
+   name, which is what carries *which* name this pair is for across the container
+   boundary.
+4. **The container** adopts that pair, re-hardens the key to 0600, and writes the
+   `tls` block.
+
+The pair lands in the one directory the host bind-mounts into the container, so
+the server reads exactly what `tailscale` wrote.
+
+### Plain first, then `sudo -n`
+
+The cert call is tried as the invoking user first, and only then with `sudo -n`:
+
+```bash
+tailscale cert --cert-file <cert> --key-file <key> <name>
+sudo -n tailscale cert --cert-file <cert> --key-file <key> <name>
+```
+
+The plain call works once somebody has run `sudo tailscale set --operator=$USER`
+on the host, which is the documented fix and what the command tells you when the
+cert step fails:
+
+```
+XX tailscale could not issue a certificate for <name>.
+   If it said HTTPS is not enabled: Tailscale admin console >
+   DNS > HTTPS Certificates > Enable.
+   If it said cert access denied, run once on this host:
+     sudo tailscale set --operator=$USER
+   A self-signed pair works meanwhile: ainode tls enable
+```
+
+Two other refusals are worth knowing: no `tailscale` on the host at all says so
+and points at `ainode tls enable` for a self-signed pair, and a tailnet name that
+cannot be read says *Is tailscaled up? Check: tailscale status*.
+
+<Note>
+HTTPS must be enabled for the tailnet first: Tailscale admin console, **DNS**,
+**HTTPS Certificates**. A real certificate is what a Mac client with App Transport
+Security needs, because ATS will not accept a self-signed one, so a native macOS
+app cannot talk to a self-signed node at all.
+</Note>
+
+<Warning>
+**Run these two on the host's own terminal.** The wrapper forwards a command into
+the container with `docker exec -it`, so `ainode tls enable --tailscale` and
+`ainode tls renew` over a non-TTY ssh die with *the input device is not a TTY*.
+Use `ssh -t`, or run them at the machine. Tracked as
+[issue 255](https://github.com/getainode/ainode/issues/255).
+</Warning>
+
+## The certificate renews itself
+
+A `tailscale cert` pair is Let's Encrypt, so it lives 90 days, and something has
+to notice day 76 without being asked. That something cannot be the server (it is
+in a container with no `tailscale` and it would have to restart itself to serve a
+new pair) and it cannot be `ainode doctor` (which warns correctly, but only when a
+human runs it). So it is a **timer on the host**, rendered by the installer for
+every node whatever its TLS state:
+
+| Unit | What it is |
+|---|---|
+| `ainode-tls-renew.timer` | `OnCalendar=daily`, `RandomizedDelaySec=4h` so a cluster installed in one sitting does not ask Let's Encrypt for every node in the same second, and `Persistent=true` so a node that was asleep past its window still runs it once it is back |
+| `ainode-tls-renew.service` | `Type=oneshot`, `ExecStart=/usr/local/bin/ainode tls renew`, `TimeoutStartSec=600` |
+
+A node with TLS off costs one `docker exec` a day that prints *nothing to renew*,
+and a node that turns TLS on later is already covered rather than needing a
+reinstall.
+
+**The container decides, the host acts.** The wrapper asks
+`ainode tls renew --check` inside the container, which owns the 14 day rule, and
+only a `renew=yes` makes it call `tailscale cert`.
+
+What the renewal does and does not do:
+
+- It renews **into the files the config points at**, not into name-derived ones. A
+  pair from an earlier manual run can be sitting at `cert.pem`, and renewing into
+  a new filename would leave the server reading the expiring one.
+- It **restarts the node only when the expiry actually moved.** Early in the
+  cycle `tailscale cert` hands back the cached certificate; the wrapper compares
+  `notAfter` before and after and says *tailscale handed back the same certificate*
+  rather than bouncing the node for nothing.
+- `AINODE_TLS_RENEW_RESTART=0` leaves the restart to a human, and says so: the
+  node goes on serving the old certificate until `sudo systemctl restart ainode`.
+- A node that is **down** is not a renewal that failed. It exits 0 with *Could not
+  ask the container about the certificate*, so a daily timer does not mark itself
+  failed all through an outage.
+- A failed `tailscale cert` leaves the old pair in place and still being served.
+
+### What it refuses to replace
+
+The renewal acts as root on the host, so the refusals matter as much as the
+approvals (`ainode/tls/renew.py`):
+
+| Situation | Answer |
+|---|---|
+| The certificate cannot be read | Never replaced. "I could not parse it" is not evidence that it is expiring, and overwriting a working pair on a guess is worse than a warning nobody read |
+| It is **self-signed** | Never replaced by a tailnet one. Its SANs are the hostname and every address on the box, while a MagicDNS certificate carries one name, so swapping them silently would break every client reaching the node by IP |
+| It is CA-issued for a name **outside the tailnet** | Left alone: `tailscale cert` cannot issue for it, so the only honest answer is that it has to be renewed the way it was issued |
+| TLS is enabled and the pair is **gone** | This one does act. The block says the node serves HTTPS, so a missing pair is a node that came up HTTP only, and re-running the cert step is the repair |
+
+### `ainode tls renew --check`
+
+The machine-readable half, and what the timer reads through the wrapper. It prints
+`key=value` lines, deliberately not JSON, because the consumer is a bash function:
+
+```
+renew=yes
+name=spark-1.tailnet-name.ts.net
+days_left=11.4
+reason=11.4 days left on spark-1.tailnet-name.ts.net, inside the 14 day window.
+cert_name=spark-1.tailnet-name.ts.net.crt
+key_name=spark-1.tailnet-name.ts.net.key
+```
+
+`cert_name` and `key_name` are basenames, because the host has to name those files
+under **its own** `<AINODE_HOME>/tls` rather than the container's.
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Renew now |
+| `10` | Decided, nothing to do. This is what lets a daily timer stay silent for 75 days |
+
+Without `--check` the same decision is printed for a human, with the reason, the
+days left, and a note that the renewal runs on the host and that the timer already
+does it daily.
+
+The threshold is **14 days**, which is inside Tailscale's own renewal window for a
+90 day pair, so a call at that point returns a freshly issued certificate rather
+than the cached one. `ainode doctor` warns on the same number deliberately: the
+operator and the timer must not disagree about when a certificate is getting old.
+
+## The other two ways to get a certificate
+
+### Self-signed (with no flags)
 
 With no flags, `ainode tls enable` generates one self-signed leaf: RSA 2048,
 SHA-256, **825 days** of validity (the ceiling Apple and the CA/Browser Forum
@@ -93,35 +246,13 @@ one directory, so a path like `/etc/letsencrypt/live/...` does not exist inside
 it and the node would come up with TLS enabled and no certificate. The copied
 key is re-hardened to 0600.
 
-### Tailscale, for a real certificate
-
-```bash
-ainode tls enable --tailscale
-```
-
-This reads the node's MagicDNS name from `tailscale status --json` (`Self.DNSName`)
-and asks `tailscale cert` for a Let's Encrypt certificate on it. That is what a Mac
-client with App Transport Security needs: ATS will not accept a self-signed
-certificate, so a native macOS app cannot talk to a self-signed node at all.
-
-HTTPS must be enabled for the tailnet first (Tailscale admin console, **DNS**,
-**HTTPS Certificates**), or the command says so and exits.
-
-<Note>
-Run from inside the AINode container, `--tailscale` cannot work: the image ships
-no `tailscale` binary and the tailnet daemon socket is not mounted. The command
-detects this and prints the two commands to run **on the host** instead, with
-the host paths already filled in, followed by the `ainode tls enable --cert ...
---key ...` line to run afterwards. `<AINODE_HOME>/tls` in the container is the
-same directory as `~/.ainode/tls` on the host, so the server reads what
-tailscale wrote.
-</Note>
-
 ## Where the pair lives
 
-`<AINODE_HOME>/tls/` (`~/.ainode/tls/` on a normal install), as `cert.pem` and
-`key.pem`. It is the one directory the host bind-mounts into the container, so
-it is the only place a file the CLI writes is also a file the server can read.
+`<AINODE_HOME>/tls/` (`~/.ainode/tls/` on a normal install). A self-signed or
+installed pair is `cert.pem` and `key.pem`; a tailnet pair is `<name>.crt` and
+`<name>.key`, named for the one name it was issued for. It is the one directory
+the host bind-mounts into the container, so it is the only place a file the CLI
+writes is also a file the server can read.
 
 ## The `tls` block in `config.json`
 
@@ -132,8 +263,8 @@ exactly as it found it (atomically, via a temp file and a rename):
 {
   "tls": {
     "enabled": true,
-    "cert_file": "/root/.ainode/tls/cert.pem",
-    "key_file": "/root/.ainode/tls/key.pem",
+    "cert_file": "/root/.ainode/tls/spark-1.tailnet-name.ts.net.crt",
+    "key_file": "/root/.ainode/tls/spark-1.tailnet-name.ts.net.key",
     "port": 3443
   }
 }
@@ -146,11 +277,45 @@ when `enabled` is true **and** both files are readable right now.
 
 `ainode tls disable` flips `enabled` to false and deletes nothing.
 
+## A node advertises the scheme it really serves
+
+Once TLS is on, the node says so where a client looks for an address.
+`GET /api/cluster/endpoint`, `endpoint_hint` on `/api/status`, and the `self` and
+`master` blocks all carry three fields per row:
+
+| Field | Meaning |
+|---|---|
+| `port` | The **HTTP** port, always, in every row. The peer proxy and every older client build `http://host:port` out of it, so moving it to the TLS port would take a node out of its own cluster |
+| `tls` | Whether that node opens a TLS listener |
+| `tls_port` | Where the second listener is, or `null` |
+| `url` | What a client should prefer: `https://host:<tls port>` when `tls` is true, `http://host:<web port>` otherwise |
+
+A row claims `tls` only when the node really serves it: enabled, on a port that
+differs from the HTTP port, with both files present and the pair loading. A broken
+pair advertises `http`, the same as the listener's own rule.
+
+**Only a node's own rows can claim TLS.** A peer's TLS state is not on the
+discovery wire (the announcement is one datagram under a hard size ceiling, and
+TLS between peers is deliberately out of scope), so a peer row says `http` and a
+client that wants that node's HTTPS learns it by asking that node. Nothing in that
+payload probes anything. See [Surviving the master](/cluster/endpoint).
+
+<Warning>
+**The `https` url carries the address the row is about, which may not be a name
+the certificate covers.** A tailnet certificate is issued for one MagicDNS name,
+so an `https://10.0.0.7:3443` built from a LAN address will not validate against
+it. A client that wants HTTPS should reach the node by its MagicDNS name, which is
+also the address the row reports when the client already used it. Tracked as
+[issue 256](https://github.com/getainode/ainode/issues/256).
+</Warning>
+
 ## What reports the state
 
 `ainode tls status` prints whether TLS is enabled, the port, the HTTP port
 beside it, and for the configured certificate whether it is self-signed or
-CA-issued, when it expires, how many days are left, and its SAN list.
+CA-issued, when it expires, how many days are left, and its SAN list. With TLS
+off it also prints this node's tailnet name and the enable command for it, when
+there is one to print.
 
 `GET /api/status` carries a `tls` block, which is what the dashboard's
 **Config, API access** panel reads:
@@ -170,18 +335,6 @@ certificate configured`, `TLS enabled but <file> is not there`, `TLS enabled,
 certificate unreadable: <error>`, `HTTPS on <port>, self-signed certificate`, or
 `HTTPS on <port>, CA-issued certificate`.
 
-The dashboard no longer claims there is no TLS. **Config, API access** used to read
-out a fixed sentence saying a key travels in plain text; it reads this block now,
-including the certificate's kind and expiry, and says so plainly when the browser
-has no key to read `/api/status` with.
-
-<Warning>
-**Nothing renews a certificate automatically.** A self-signed pair lasts 825 days
-and a `tailscale cert` pair is a Let's Encrypt certificate with a Let's Encrypt
-lifetime. Watch the `ainode doctor` warning and re-run `ainode tls enable`, then
-restart the node.
-</Warning>
-
 ## What `ainode doctor` says
 
 The `tls.enabled` check reports:
@@ -191,7 +344,18 @@ The `tls.enabled` check reports:
 | TLS off | **WARN**: the dashboard, the API and any key travel in clear text on the HTTP port. Not a FAIL, because off is the default and is fine on a LAN or a tailnet |
 | Enabled with no certificate configured, or the file is not there | **FAIL**: the port never opens |
 | Certificate expires in 14 days or fewer | **WARN** |
-| Certificate already expired | **FAIL**: every HTTPS client is refusing this node |
+| Certificate already expired | **FAIL**, naming how many days ago: every HTTPS client is refusing this node |
 | Otherwise | **OK**, naming the port, the kind and the days left, with the HTTP port beside it |
+
+**The fix line names this node.** With TLS off it prints the node's MagicDNS name
+and `ainode tls enable --tailscale (a real certificate for <name>)`, so the fix is
+a copy and a paste rather than a shape of a command you then have to go and fill
+in. Inside the renewal window on a tailnet certificate it points at
+`ainode tls renew on the host` and says the installer's timer already runs that
+daily, because there the warning is informational.
+
+The name is found from the wrapper's environment variable, from `tailscale status`,
+or from a reverse MagicDNS lookup of this node's own tailnet address, bounded at
+two seconds, because the doctor is a command somebody is watching.
 
 See [Doctor](/ops/doctor) for the rest of the report.

@@ -40,15 +40,17 @@ curl -fsSL https://ainode.dev/install | bash
   </Card>
   <Card title="Prometheus metrics" icon="chart-line" href="/api-reference/metrics">
     `/metrics` on port 3000 for Grafana, Prometheus, VictoriaMetrics, with 48 hours of
-    history kept on the node itself.
+    history kept on the node itself and a Metrics view that charts any node in the
+    fleet.
   </Card>
   <Card title="Speech to text" icon="microphone" href="/api-reference/audio">
     `/v1/audio/transcriptions` and `/v1/audio/translations`, routed across the fleet
     like a chat completion.
   </Card>
   <Card title="Auth, TLS and rate limits" icon="lock" href="/security/api-keys">
-    Require an API key from the dashboard, add HTTPS on a second port, and cap what
-    one client can hold.
+    A fresh install mints a key and requires it, peers authenticate with a key
+    derived from the cluster secret, one command gets a real tailnet certificate for
+    HTTPS on a second port, and per-client limits cap what one caller can hold.
   </Card>
   <Card title="Desktop app" icon="display" href="/desktop">
     The dashboard as a native macOS app, with the fleet in the menu bar and failover

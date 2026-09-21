@@ -1,0 +1,165 @@
+---
+title: "A restart keeps its engines"
+description: "A service restart or an ainode update adopts every engine that is still serving instead of reloading it, and ainode stop no longer frees the GPU."
+icon: "recycle"
+---
+
+An engine container is a sibling of the orchestrator, spawned through
+`docker.sock`. So a `systemctl restart ainode`, and therefore every
+`ainode update`, does not touch it: the engine goes on serving while the new
+process comes up with no record of it.
+
+Until 0.5.30 the new process then destroyed it. `ainode start` swept every engine
+container this node owns before the boot engine relaunched `config.model`, and the
+orchestrator stopped its own engine on the way out, so a restart cost a **full
+model load**: 420 seconds on pollux, 834 on castor, measured.
+
+Now a boot looks at what is running first, and keeps what is still serving.
+Measured on pollux: a restart that cost 420 seconds has the model answering
+through the master in **1 second**, on the same engine container, with nothing
+reloaded and no phantom row in the launch-time ledger.
+
+## The three gates
+
+Before the sweep and before anything launches, `ainode start` inspects each
+container a launch on this node would have created and keeps it only when all
+three answer yes (`ainode/engine/reconcile.py`):
+
+| Gate | What it means |
+|---|---|
+| **Running** | An exited container is a corpse and belongs to the sweep |
+| **Same shape** | Its own argv matches the configured recipe: the served model, the port, the engine image, the tensor-parallel width, and the distributed executor. An update that moved the engine image therefore still reloads |
+| **Answering** | `/health` on the engine port, then `GET /v1/models` naming that model. Both are asked, in that order, because they fail for different reasons: `/health` is silent while an engine is still loading, and `/v1/models` is what says which model a bound engine is serving |
+
+A container that fails a gate reloads exactly as it did before, and the boot prints
+one line saying which gate said no, naming the field and both values:
+
+```
+adopted Qwen/Qwen3.8-27B-NVFP4 on :8000 (container ainode-vllm-node-solo, up 3h 12m)
+relaunching Qwen/Qwen3.8-27B-NVFP4: runs scitrera/dgx-spark-vllm:0.17.0-t6, config says scitrera/dgx-spark-vllm:0.17.0-t5
+```
+
+That wording matters because the operator reading a boot log has to be able to
+tell "I changed the model" from "this release moved the engine image", and those
+are the two reasons a restart still has to reload.
+
+The same treatment covers a **distributed head** and every **stacked instance**
+the manifest names, not only the primary. A kept container is skipped by the
+sweep rather than removed, and recorded in the `InstanceManager` with
+`adopted: true` and a status of `serving`.
+
+## `ainode stop` leaves the engines running
+
+**This changes what `stop` means.** A graceful shutdown no longer stops a
+still-serving engine container, because stopping it was exactly what left the next
+boot with nothing to adopt. Every stacked engine already outlived the
+orchestrator; the primary and the head now behave the same way.
+
+The line on the way out says so, and names how to free the GPU instead:
+
+```
+engine left serving <model> on :8000 (container ainode-vllm-node-solo); the next
+start adopts it. To free the GPU: docker rm -f ainode-vllm-node-solo
+```
+
+That line goes to the orchestrator's own output, so on a service install it is in
+`journalctl -u ainode` rather than in what `ainode stop` prints.
+
+<Warning>
+**On a systemd install, `ainode stop` is not how you keep a node down.** It stops
+the process inside the container, the container exits, and the unit's
+`Restart=always` brings it back about ten seconds later, which then adopts. Use
+`sudo systemctl stop ainode`, which runs the same graceful shutdown through the
+unit's `ExecStop`.
+</Warning>
+
+On a **distributed head** the same rule leaves the head container running and the
+peers' worker containers with it. The line names only the head's own container, so
+freeing a head means removing the workers on the peers too.
+
+What is still cleaned up:
+
+- A container that is **not running** is stopped through the backend, which reaps
+  a corpse and a head's peer containers.
+- The `docker logs -f` follower is always closed, because leaving it behind
+  orphans a docker client that goes on writing into the engine log after the
+  process is gone.
+
+To start a node **idle**, the sentinel is unchanged and adopts nothing by design:
+
+```bash
+touch ~/.ainode/.start-clean
+sudo systemctl restart ainode
+```
+
+It is single use: the file is removed when it is found, so the next restart serves
+normally. `AINODE_START_CLEAN=1` in the environment does the same thing and, being
+an environment variable, keeps doing it. Either way the boot adopts nothing, the
+sweep frees every engine container the node owns, and the manifest is not replayed,
+so the node comes up with nothing loaded.
+
+<Warning>
+**The first restart after installing 0.5.30 still reloads on every node**, and it is
+also the restart most likely to hit the gap below. The process being stopped is the
+older one, which predates the fix and still removes the primary's container on the
+way out, so the new boot has no primary to adopt. It never stopped **stacked**
+containers, though, so those are adopted while the primary reloads, which is exactly
+the shape of issue 254. Adoption starts paying from the restart after that.
+</Warning>
+
+## What reports it
+
+| Where | Field |
+|---|---|
+| `GET /api/status` | `engine_adopted`, a boolean for the engine on this node's own port. A reader otherwise cannot tell a restart that kept its engine from one that reloaded it in the seconds before the load phase would have said so |
+| `GET /api/nodes` | `adopted` on each announced instance, in the per-node `instances[]` list a clustered node reports. The projection used to drop the flag, so nothing could tell an engine that survived a restart from one the reporting process launched |
+
+```json
+{"instances": [{"model": "nvidia/Qwen3.6-35B-A3B-NVFP4", "api_port": 8000,
+                "status": "serving", "tensor_parallel_size": 1, "adopted": true}]}
+```
+
+<Note>
+On a **distributed head** the flag is weaker than it looks: the head's record is
+stamped adopted from whichever head container is running when the replay looks,
+including one this boot launched. On a solo primary and on stacked instances it
+means what it says.
+</Note>
+
+## Known gap: a stacked instance can hold the memory the primary needs
+
+<Warning>
+**Issue [#254](https://github.com/getainode/ainode/issues/254).** When the primary
+has to relaunch but a stacked instance was adopted, the stacked instance keeps its
+reservation, and the primary can be refused for memory.
+</Warning>
+
+Seen on Spark-1 during the 0.5.30 roll. The old process's shutdown had removed the
+primary's container (Qwen3.8-27B at `gpu_memory_utilization` 0.60) and left the
+stacked Ornith container (0.26) running. The new process adopted Ornith, which was
+healthy, and then relaunched the primary twice into
+`Engine core initialization failed`: with Ornith holding about 47 GB of the 121 GB
+unified pool, 71 GB was free and the primary's 0.60 fraction asks for 73 GB. The
+node sat with its primary down for 45 minutes.
+
+**What the operator does**, which is what fixed it that night: stop the service,
+remove the stacked container, and start again. A start replays the primary first
+and the stacked instance after it, which is the order they were launched in and the
+order the manifest records.
+
+```bash
+sudo systemctl stop ainode
+docker rm -f ainode-vllm-node-solo-8001    # the adopted stacked container
+sudo systemctl start ainode
+```
+
+`docker ps --filter name=ainode-vllm` names the containers on the node, and a
+stacked one carries its port. Adoption itself is not the problem to work around:
+a node whose primary comes back adopted needs none of this.
+
+## A head across a restart
+
+A distributed head has more to reconcile than a solo node, because its engine
+spans machines: the shape is recorded, a missing container may be replayed, and a
+peer that does not answer makes the record degraded rather than guessing. See
+[A head across a restart](/cluster/head-restart).

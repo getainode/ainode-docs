@@ -41,13 +41,42 @@ publishes it** as of 0.5.28. A job resolves it in this order:
 | Order | Image |
 |---|---|
 | 1 | `$AINODE_TRAIN_IMAGE` / `$AINODE_QUANT_IMAGE`, an operator's explicit override. A quantize job reads `AINODE_QUANT_IMAGE` first, a training job `AINODE_TRAIN_IMAGE` first |
-| 2 | `ghcr.io/getainode/ainode-train:<this AINode version>`, the release image. Published, so a fresh node pulls it (about 8.6 GB to download, about 22 GB on disk) |
+| 2 | `ghcr.io/getainode/ainode-train:<this AINode version>`, the release image |
 | 3 | `ainode-quant:0.17.0-t5`, the tag four Sparks built by hand in June 2026 and nothing else in the world has |
 
+**Published tags: `0.5.27`, `0.5.28`, `0.5.29` and `0.5.30`**, plus `latest`, all
+pointing at the same digest. So a node on any of those releases resolves (2) with
+no configuration, which is the difference from before: the answer to a node that
+has never built anything is a pull rather than an hour of building.
+
+<Warning>
+**Nothing pulls it implicitly.** The image is about **22 GB**, so a job resolves
+its candidates with `docker image inspect` and never pulls one. Pull it once per
+node:
+
+```bash
+docker pull ghcr.io/getainode/ainode-train:<your ainode version>
+```
+
+A node with none of the three candidates present is rejected up front with all
+three named and the pull, the build and the override spelled out, rather than
+dying with `docker` exit 125 in a log.
+</Warning>
+
+GHCR is the only registry for it: there is no Docker Hub mirror of the training
+image.
+
 The release image is built by `.github/workflows/publish-train-image.yml` on a
-`train-v*` tag or a manual dispatch, on the self-hosted aarch64 runner. An
-`alias_versions` input lets one 22 GB build answer for several releases; an alias
-tag re-uploads nothing.
+`train-v*` tag or a manual dispatch, on the self-hosted aarch64 runner, from
+`scripts/Dockerfile.quant` over the GB10 engine base. An `alias_versions` input
+lets one 22 GB build answer for several releases; an alias tag re-uploads nothing,
+which is how four release tags came off one build.
+
+On a node whose AINode version has no matching tag, point it at one you have:
+
+```bash
+sudo systemctl set-environment AINODE_TRAIN_IMAGE=ghcr.io/getainode/ainode-train:0.5.30
+```
 
 Until 0.5.27 only (3) existed and CI published nothing, so every training,
 quantize and merge job on a node that had not built it died with `docker` exit 125

@@ -133,6 +133,92 @@ The body accepts `hf_repo`, `repo`, or `model_id`; a value without a `/` is
 rejected with 400. Downloads are commit-pinned (one resolved SHA threaded to
 every file), intra-repo parallel, and genuinely cancellable file-by-file.
 
+### A download that cannot fit is refused first
+
+Since 0.5.30 the node learns the checkpoint's size before the transfer starts and
+compares it with free space on the models directory. A pull with nowhere to go is
+an **HTTP 507** naming what is needed, what is free and which path was measured,
+instead of a transfer that dies part way and leaves a partial blob cache behind:
+
+```json
+{
+  "error": "not enough free space: meta-llama/Llama-3.1-405B needs 688.6 GB and only 13.1 GB is free on /mnt/ai-models",
+  "fit": {
+    "hf_repo": "meta-llama/Llama-3.1-405B",
+    "path": "/mnt/ai-models",
+    "needed_bytes": 688600000000,
+    "needed_gb": 688.6,
+    "free_bytes": 13100000000,
+    "free_gb": 13.1,
+    "fits": false,
+    "size_source": "hub_files",
+    "detail": "meta-llama/Llama-3.1-405B needs 688.6 GB and only 13.1 GB is free on /mnt/ai-models"
+  },
+  "force": "send {\"force\": true} to download it anyway"
+}
+```
+
+507 is *Insufficient Storage*, and it is that rather than a 400 or a 409 because
+no other refusal on this route means it: a 400 would say the caller asked wrongly,
+and 409 is the launch-slot refusal the dashboard already reads as "another load is
+running".
+
+| Field | Meaning |
+|---|---|
+| `needed_bytes` / `needed_gb` | The checkpoint's total size. `*_gb` is **decimal** GB (10^9 bytes), matching the catalog's own `size_gb`, and rounded to one decimal |
+| `free_bytes` / `free_gb` | Free space on the path below, same units |
+| `path` | Which filesystem was measured. The models directory is usually not the same filesystem as the AINode home, and often not the same as `/` |
+| `fits` | `true`, `false`, or `null` when something could not be measured |
+| `size_source` | Where the size came from: `hub_files`, `safetensors`, `cache`, `catalog`, or `null` |
+
+**`force` overrides it**, in the JSON body (`force` or `force_download`, as `true`
+or the strings `"1"`, `"true"`, `"yes"`), never as a query parameter:
+
+```bash
+curl -X POST http://localhost:3000/api/models/download-repo \
+  -d '{"hf_repo": "meta-llama/Llama-3.1-405B", "force": true}'
+```
+
+The check refuses on evidence, never on the absence of it. A size nobody can learn
+is **unknown**, and unknown always proceeds: reporting 0 would read as "fits in
+nothing", which is how a download gets waved through onto a full disk. There is
+also **no safety margin**: it refuses when the checkpoint is bigger than the free
+space and not a byte sooner, because a margin would be a number nobody measured
+standing between an operator and a download.
+
+Three routes carry the check: `POST /api/models/download-repo`,
+`POST /api/models/{model_id}/download`, and `POST /api/models/load` when the
+weights are not already on disk. The launch path asks no question of the Hub (a
+launch must not wait on an HTTP round trip), so it decides from what the node
+already knows: a remembered size or the catalog entry.
+`POST /api/sharding/launch` does not carry it.
+
+A learned size is remembered in `<AINODE_HOME>/repo-sizes.json`, keyed by repo, so
+the second question about the same repo costs nothing:
+
+```json
+{"meta-llama/Llama-3.1-405B": {"total_bytes": 688600000000, "source": "hub_files", "at": 1789871479.2}}
+```
+
+Only a **known** size is written, and an entry is ignored after **30 days**,
+because a transient API failure must not freeze "unknown" in for a month and a repo
+can be re-quantized under the same id.
+
+<Note>
+The model card in the dashboard shows the same question as a **Disk** row:
+*~N GB on disk, F GB free* for a checkpoint already there, *~N GB to fetch, F GB
+free* when it fits, *~N GB to fetch, only F GB free* in amber when it does not, and
+*size unknown* when nobody could learn it. The card has no force button, and a
+refused download in the browser surfaces as a generic *Download failed: HTTP 507*
+toast; use the API with `force` to override.
+</Note>
+
+<Warning>
+The `free_gb` in a 507 body is **decimal GB**, while `disk.models.free_gb` on
+`GET /api/status` and `ainode doctor`'s disk rows are **GiB**. The same filesystem
+reads 13.1 in one and 12.2 in the other. They are not the same number.
+</Warning>
+
 Poll a single job:
 
 ```bash

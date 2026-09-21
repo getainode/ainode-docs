@@ -37,13 +37,20 @@ was invisible for exactly that reason, and so was every other way an old contain
 can come back.
 
 After the restart the wrapper polls this node's own
-`http://127.0.0.1:<web_port>/api/status` **every 3 seconds** until it reports the
+`http://127.0.0.1:<web_port>/api/health` **every 3 seconds** until it reports the
 version just installed, for up to **180 seconds**
 (`AINODE_UPDATE_VERIFY_TIMEOUT`). On success:
 
 ```
-==> Node is serving 0.5.29
+==> Node is serving 0.5.30
 ```
+
+It reads `/api/health` because that is the one route that answers **without an API
+key**, and it carries the running `version` for exactly this reason. It used to
+read `/api/status`, which needs the key: on a node that requires one, every update
+would have pulled, pinned, restarted, failed to read a version and then exited
+non-zero saying the update did not apply. The failure text below still prints the
+words "/api/status reports", which is stale wording, not a second request.
 
 When it does not come back on the new version, nothing is removed and it **exits
 non-zero**, printing what the node actually reports and what to check:
@@ -64,13 +71,27 @@ instead of claiming an update:
     Start it with: sudo systemctl start ainode
 ```
 
-<Warning>
-One case still exits 0 without verifying: when GHCR cannot be reached and you named
-no version, the wrapper pulls the baked default `:latest`, says
-`!! Could not resolve a version`, restarts, and has no target to verify against. It
-does not print `Update complete`, but it does not fail either. Name a version
-explicitly on a node with no reliable route to GHCR.
-</Warning>
+**An update it could not verify is a failure now.** When GHCR cannot be reached
+and you named no version, the wrapper pulls the baked default, restarts, and has
+no target to compare against. Through 0.5.29 that exited 0; since 0.5.30 it
+**exits 1** and says what it did and did not do:
+
+```
+XX Could not resolve a version from ghcr.io, so nothing was verified.
+   ghcr.io/getainode/ainode:latest was pulled and ainode.service restarted.
+   /api/status reports: 0.5.30
+   Images were left alone. Name the version to be sure:
+     ainode update <version>
+```
+
+Name a version explicitly on a node with no reliable route to GHCR.
+
+Two other non-zero exits are argument errors, before anything is pulled: exit **2**
+for `--keep-images` without a number, with a value that is not a non-negative
+integer, or for an unknown option.
+
+A node whose service is not running still exits **0**: it was pinned, and that is
+what was asked.
 
 ## Step 5: it removes the images it replaced
 
@@ -121,9 +142,25 @@ They live in `core/image_prune.py` as a pure function of a `docker images`
 listing, so the decision can be read and tested with no docker daemon anywhere
 near it.
 
-**Considered:** only AINode's own app-image repositories. `ainode-base`, engine
-images and everything else on the host are never touched: a node's engine images
-are what it serves models with, and deleting one costs a multi-gigabyte pull.
+**Considered:** only AINode's own app-image repositories, which are exactly these
+four:
+
+| Repository | What it is |
+|---|---|
+| `ghcr.io/getainode/ainode` | The release registry, and what the installer pulls |
+| `argentaios/ainode` | The Docker Hub mirror |
+| `argentos/ainode` | The older Docker Hub mirror name |
+| `ainode` | A local build |
+
+`ainode-base`, engine images and everything else on the host are never touched: a
+node's engine images are what it serves models with, and deleting one costs a
+multi-gigabyte pull.
+
+<Note>
+The mirror name used to be misspelled in that list, so tags under it held the bytes
+of images the prune reported as removed. Fixed in 0.5.30, which is why a node
+rolled from an older release can reclaim more than it expects the first time.
+</Note>
 
 **Kept:**
 
