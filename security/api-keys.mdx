@@ -328,6 +328,23 @@ on.
 The terminal bench takes a key too: `scripts/ainode-bench.py --api-key <key>`, or
 `AINODE_API_KEY` in the environment. See [Bench API](/api-reference/bench).
 
+## The shape a protected fleet takes
+
+Nothing here is required, and a node on a trusted LAN can reasonably run with less.
+This is what every piece above adds up to when they are all turned on:
+
+| Piece | What it gives you |
+|---|---|
+| **A key on every node**, minted per client with `ainode auth key create --name` | Nothing reaches `/api` or `/v1` without a credential you issued, and `key list` says who holds what |
+| **One `cluster_secret` across the fleet**, distributed by [`ainode join`](/cluster/joining) | Every node authenticates to every other node with the derived fleet key, and discovery is signed at the same time. Rotating it rotates both |
+| **[TLS](/security/tls) on its own port**, from `ainode tls enable --tailscale`, with the renewal timer | The key stops travelling in clear text, and clients read the scheme off `/api/cluster/endpoint` rather than being told |
+| **[Rate limits](/security/rate-limits)** on `/v1` | One caller cannot hold every engine in the cluster |
+| **`ainode doctor`** on each node | `auth.state`, `cluster.secret`, `tls.enabled` and `ratelimit.state` are the four lines that say whether the above is actually in force |
+
+The combination that is broken rather than merely unprotected is **auth on with
+peers and no `cluster_secret`**: that node answers 401 to its own cluster. It is the
+one FAIL in this area, and `ainode doctor` names the join command that fixes it.
+
 ## Clients
 
 [AINode Desktop](/desktop) 0.2.0 has an optional API key setting, so a protected
