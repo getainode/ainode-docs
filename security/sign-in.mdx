@@ -1,0 +1,201 @@
+---
+title: "Sign in and accounts"
+description: "People sign in to the dashboard with a name and a password. Programs keep using an API key. The first account, the account page, managing users, and how to get back in."
+icon: "user-lock"
+---
+
+With auth on, the dashboard asks a person to sign in. A name, a password, and the
+session lasts until you sign out or until an admin revokes it.
+
+Programs are unchanged. A coding agent, [AINode Desktop](/desktop), the bench and
+curl all keep presenting an API key as `Authorization: Bearer <key>`.
+
+## Why there is a login
+
+An API key is a machine credential. It protects the port, and that is all it
+does. Pasted into a browser it is one shared secret: the node cannot tell one
+person from another, and revoking the key revokes everyone holding it.
+
+A login is the part that belongs to a person. Each person has their own name and
+password, their sessions are their own, and an admin can take one person's access
+away without touching anybody else.
+
+| Caller | What it presents |
+|---|---|
+| A person on the dashboard | A name and a password, then a session |
+| A program: a coding agent such as dsh or Pi, [AINode Desktop](/desktop), the bench, curl | An API key, as `Authorization: Bearer <key>` |
+
+Both work at the same time on the same node. [API keys](/security/api-keys)
+covers the key half.
+
+## The first account
+
+Accounts are made on the **master node**, from the CLI, because the first one
+cannot be made from a page that needs an account to open.
+
+```bash
+ainode auth user add <name> --admin
+```
+
+It prompts for the password. In a script, `--password-stdin` reads it from the
+pipe instead:
+
+```bash
+printf '%s' "$PASSWORD" | ainode auth user add <name> --admin --password-stdin
+```
+
+If the node does not require auth yet, turn it on:
+
+```bash
+ainode auth enable
+```
+
+<Note>
+Make the first account **before** you turn auth on. A node that requires auth
+with no account is a node with a sign-in nobody can pass, and the way out is the
+same command above, typed on the node itself.
+</Note>
+
+### On a fresh node
+
+A fresh install already requires an API key, so `ainode auth enable` has nothing
+to do (see [API keys](/security/api-keys)). One command is the whole setup:
+
+```bash
+ainode auth user add <name> --admin
+```
+
+Then open the dashboard and sign in.
+
+### On a fleet that is already running
+
+Run the same commands on the **master**. Accounts are managed there and
+replicated to every node in the cluster automatically, so you add a person once
+and they can sign in on any node.
+
+**Sessions are per node.** A replicated account is one account, but signing in
+creates a session on the node whose dashboard you opened. Open another node's
+dashboard and you sign in again.
+
+## Signing in
+
+Open the node's dashboard and type your name and password. That is the whole
+flow. The session lasts until you sign out, or until an admin revokes it. A
+revoked session ends wherever it was open.
+
+## Your account page
+
+Yours whatever your role:
+
+- **Change your password.**
+- **See your sessions and revoke them**, one per browser you have signed in from.
+  A machine you left signed in somewhere else is one click to end.
+
+## Managing users
+
+Admins get a **Users** page: add an account, remove one, reset somebody's
+password, disable an account and enable it again. Disabling keeps the account and
+refuses the sign-in, which is what you want for somebody who is coming back.
+
+| Role | What it can do |
+|---|---|
+| `admin` | Manage users, manage API keys, and turn the auth switch on and off. Everything a member can do as well |
+| `member` | Use the dashboard |
+
+Two roles, and that is the whole list.
+
+## From the CLI
+
+```bash
+ainode auth user add <name> --admin   # an admin account. Prompts for the password
+ainode auth user add <name>           # a member account
+ainode auth user list                 # the accounts that exist
+ainode auth user passwd <name>        # set somebody a new password
+ainode auth user disable <name>       # keep the account, refuse the sign-in
+ainode auth user enable <name>        # let them back in
+ainode auth user remove <name>        # delete the account
+
+ainode auth session list              # who is signed in
+ainode auth session revoke            # end one session
+ainode auth session clear             # end all of them
+
+ainode auth status                    # the switch, the keys, and now the users
+                                      #   and the sessions as well
+```
+
+Every one of them takes `--help` for its exact arguments. Run the `user` commands
+on the master, since that is where accounts are managed. The `ainode auth key`
+commands are unchanged and live on [API keys](/security/api-keys).
+
+## Serve it over HTTPS
+
+A sign-in over plain HTTP sends the password in the clear. Anything on the path
+between the browser and the node can read it, and on a LAN that is more machines
+than you think. So put the node behind HTTPS before you hand out accounts.
+
+[TLS](/security/tls) is one command. It serves HTTPS on its own port and leaves
+plain HTTP exactly where it was, so nothing else in the fleet has to change.
+
+The session cookie is marked **Secure** when the node is served over HTTPS, so on
+that port the browser will not send it back over a plain HTTP request.
+
+## What is stored, and where
+
+| File | What is in it |
+|---|---|
+| `<AINODE_HOME>/users.json` | The accounts. Password **hashes** only, never a password. Mode 0600 |
+| `<AINODE_HOME>/auth.json` | The API keys, hashed, and whether this node requires one |
+
+`<AINODE_HOME>` is `~/.ainode` unless you moved it. Passwords are hashed with
+scrypt.
+
+## What is in place
+
+One line each:
+
+- **The session cookie is HttpOnly**, so no script on the page can read it.
+- **It is marked Secure over HTTPS**, so it does not travel on a plain HTTP
+  request to that node.
+- **Every write from the dashboard carries `X-AINode-Client: dashboard`**, a
+  header a browser will not attach to a cross-site request. That is the CSRF
+  guard: another site can make your browser send your cookie, it cannot make it
+  send that header.
+- **Ten failed sign-ins in five minutes pause that address.** The pause lifts on
+  its own, and how long it lasts is described in the release notes.
+- **Passwords are scrypt-hashed**, so the file holds no password to steal.
+
+## The paths that stay open
+
+With auth on, everything under `/api` and `/v1` needs a credential. The
+exceptions are the static shell and these paths, two of which the sign-in itself
+needs:
+
+| Path | Why it stays open |
+|---|---|
+| `/` and `/static/*` | The shell is files. Without it the browser cannot render the page that asks you to sign in |
+| `/api/health` | A liveness probe holds no credential |
+| `/api/auth/status` | So the page can say this node wants one, instead of rendering blank |
+| `/api/auth/me` | So the page can ask whether you are signed in |
+| `/api/auth/login` | The request that signs you in cannot need a session first |
+| `/api/cluster/endpoint` | Names, addresses and ports, so a client stranded by its own node can find a reachable one |
+| `POST /api/cluster/join` | A node joining this cluster holds none of this cluster's credentials yet, so a single-use [join token](/cluster/joining) is the credential instead |
+
+Matching is on the path, for every method.
+[API keys](/security/api-keys) carries the rest of the rule.
+
+## What `ainode doctor` says
+
+`ainode doctor` has a **Login** check, printed with the other auth lines. What it
+verdicts on is described in the release notes. See [Doctor](/ops/doctor) for the
+rest of the report.
+
+## Troubleshooting
+
+| What happened | What to do |
+|---|---|
+| **Locked out.** The password is gone, and so is the only admin's | On the master, at the node's own terminal: `ainode auth user passwd <name>`. The CLI runs on the node, so it needs no session |
+| **No accounts yet**, and the node wants a sign-in | `ainode auth user add <name> --admin` on the master, then sign in |
+| **You were signed in and now you are not** | The session ended: you signed out, or an admin revoked it. Sign in again. `ainode auth session list` shows which sessions are still live |
+| **Too many wrong passwords** | Ten failed sign-ins in five minutes pause that address. Wait, then try again |
+| **A program started answering 401** | Programs do not sign in, they present a key. Mint one with `ainode auth key create --name <client>`: [API keys](/security/api-keys) |
+| **You can sign in on one node and not another** | Sessions are per node, so each dashboard asks once. If the account itself is not on that node, check the node actually joined the cluster: [Joining a node](/cluster/joining) |

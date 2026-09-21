@@ -84,6 +84,7 @@
           {
             "group": "Security",
             "pages": [
+              "security/sign-in",
               "security/api-keys",
               "security/tls",
               "security/rate-limits",
