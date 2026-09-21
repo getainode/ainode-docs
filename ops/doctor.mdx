@@ -1,0 +1,195 @@
+---
+title: "ainode doctor"
+description: "One command that runs the checks a human ran by hand during a fleet audit, with a one-line fix on each."
+icon: "stethoscope"
+---
+
+`ainode doctor` is where to start on a node that is behaving oddly. It runs the
+checks a human ran by hand during the 2026-09-19 fleet audit, which is the point:
+nearly every gotcha that audit turned up was one command away from being visible.
+
+```bash
+ainode doctor
+```
+
+One line per check with a verdict, and a `fix:` line wherever the answer is not
+OK.
+
+```
+AINode doctor v0.5.29  Spark-3-DGX  Made in Texas
+
+[ OK ] env.sudo                       not running under sudo
+[ OK ] config.engine_backend          nvidia backend, engine image scitrera/dgx-spark-vllm:0.17.0-t5 present locally
+[ OK ] config.gpu_memory_utilization  0.5
+[ OK ] config.discovery_port          5679
+[ OK ] docker.daemon                  docker 28.3.2 reachable
+[ OK ] disk.home                      521.4 GB free of 1858.2 GB (28%) on /root/.ainode
+[WARN] image.latest                   running 0.5.28, 0.5.29 is published
+                                      fix: ainode update (and roll every node in the fleet, not just this one)
+[WARN] tls.enabled                    no TLS: the dashboard, the API and any key travel in clear text on 3000
+                                      fix: ainode tls enable (self-signed), or ainode tls enable --tailscale for a real certificate
+[INFO] ratelimit.state                no per-client limit on /v1, so one client can hold every engine busy
+                                      fix: set rate_limit {"enabled": true, "max_inflight": 8} in config.json
+
+24 checks: 10 OK, 11 WARN, 2 FAIL, 1 INFO
+```
+
+## The verdicts
+
+| Verdict | Meaning |
+|---|---|
+| `OK` | Nothing to do |
+| `WARN` | Worth knowing, not fatal. A doctor that fails on every warning is a doctor nobody runs |
+| `FAIL` | This node cannot do its job. Exits non-zero |
+| `INFO` | A fact about the node, not a judgement. Currently the rate-limit state |
+
+## What it checks
+
+**24 checks** always, **25** once the node can see a peer, and up to **27** when a
+peer announces no fabric IP or does not answer. They run in the order a human reads
+them.
+
+### Config
+
+| Check | What it verifies |
+|---|---|
+| `env.sudo` | The sudo trap: `$HOME` moved under root, which is what made `sudo ainode update` keep the old image |
+| `config.file` | `config.json` exists and parses. Missing means every value below is a built-in default |
+| `config.engine_backend` | The configured backend's binary or image is actually on this node |
+| `config.gpu_memory_utilization` | Not a number, zero or above 1 is a **FAIL**. **0.9 or above** is a WARN: the stacked-load guard would refuse every second model |
+| `config.discovery_port` | The configured port against **5679**, the one the installer writes and the fleet runs. `--fix` writes it |
+| `config.model` | A model that is pinned is actually downloaded, so the first launch does not pay the download (and answer 401 if it is gated) |
+| `config.cluster_id` | Still `"default"` on a node that expects peers |
+
+### Docker, GPUs and disk
+
+| Check | What it verifies |
+|---|---|
+| `docker.daemon` | Docker reachable, with its version |
+| `gpu.devices` | GPUs enumerated, with their count and whether the memory is unified |
+| `disk.home` | Free space on the AINode home. A missing directory is a WARN that `--fix` creates; under **15 percent** free is a WARN |
+| `disk.models` | The same, for the models dir |
+
+### Image and service
+
+| Check | What it verifies |
+|---|---|
+| `image.pin` | The `AINODE_IMAGE` in `image.env`, which is what the systemd unit actually reads, against the running container. A pin that disagrees with what is running is a WARN: a restart would change the version under you |
+| `image.latest` | The running release against the newest published tag |
+| `service.unit` | The systemd unit is installed and active. Installed but not active is a **FAIL**. Run inside the AINode container, where there is no systemd to ask, it is a WARN saying so |
+
+### Ports
+
+| Check | What it verifies |
+|---|---|
+| `port.web` | The configured `web_port` (3000 by default) is answering. Nothing there is a **FAIL**: the dashboard and every `/api` route are down |
+| `port.engine` | The configured `api_port` (8000 by default). Listening is OK; free with a model pinned is a WARN; free with no model is the idle shape, so OK |
+| `port.discovery` | `discovery_port`/udp, read from `ss -lunH`. No `ss` on the host is a WARN |
+
+### Cluster
+
+| Check | What it verifies |
+|---|---|
+| `cluster.peers` | Peers seen on discovery, read from this node's own `/api/nodes`. No peers with no `peer_ips` configured is the solo shape, so OK |
+| `cluster.versions` | Only when there are peers. A mismatch is a WARN whose fix is to roll every node in one pass |
+| `cluster.fabric_ip` | Only when a peer announces none: a WARN whose fix is to set `cluster_interface` there |
+| `cluster.reachable` | Only when a peer's `/api/status` did not answer on the fabric address it announces |
+| `fabric.interface` | No `cluster_interface` while RoCE HCAs are present is a WARN. An interface with no IPv4 is a **FAIL** |
+| `cluster.distributed` | The recorded distributed shape. A **WARN** with the peer named in the fix line when that shape went degraded. See [A head across a restart](/cluster/head-restart) |
+
+### Security
+
+| Check | What it verifies |
+|---|---|
+| `secrets.store` | The secrets store's file mode |
+| `tls.enabled` | Whether HTTPS is served, and the certificate's expiry. See [TLS](/security/tls) |
+| `ratelimit.state` | The per-client limits, as INFO. See [Rate limits](/security/rate-limits) |
+| `credentials.hf_token` | Whether a Hugging Face token exists anywhere: `config.json`, `$HF_TOKEN` / `$HUGGING_FACE_HUB_TOKEN` / `$HUGGINGFACE_TOKEN`, or the secrets store. **Presence only, never a value.** None is a WARN, because a gated repo answers 401 at download time |
+
+## Exit codes
+
+| Code | When |
+|---|---|
+| `0` | No FAIL. WARN and INFO do not fail the run |
+| `1` | Any FAIL |
+
+So it can gate a script:
+
+```bash
+ainode doctor || echo "this node is not ready"
+```
+
+## `--json`
+
+```bash
+ainode doctor --json
+```
+
+```json
+{
+  "doctor": 1,
+  "version": "0.5.29",
+  "node_id": "25033c02",
+  "node_name": "Spark-2-DGX",
+  "generated_at": "2026-09-20T14:02:11Z",
+  "summary": {"ok": 10, "warn": 11, "fail": 2, "total": 24, "info": 1},
+  "checks": [
+    {"name": "env.sudo", "status": "ok", "detail": "not running under sudo", "fix": "", "data": {}}
+  ]
+}
+```
+
+Statuses are **lowercase** in JSON (`ok`, `warn`, `fail`, `info`); the human form
+prints them as `[ OK ]`, `[WARN]`, `[FAIL]` and `[INFO]`.
+
+Each check carries `name`, `status`, `detail`, `fix` and a `data` block with the
+numbers behind the sentence. With `--fix`, the payload also carries
+`fixes_applied`.
+
+Exit code is the same as the human form.
+
+## `--peer HOST`
+
+```bash
+ainode doctor --peer spark3
+```
+
+Runs the same report on a peer over SSH and prints its answer. It tries the
+**container first**, with a plain `docker exec` and no `-it`:
+
+```
+docker exec ainode ainode doctor --json || ainode doctor --json
+```
+
+That order matters and was found the hard way: a node installed the documented way
+does have an `ainode` on PATH, but it is the host wrapper the installer writes,
+and that wrapper runs `docker exec -it`, which over SSH dies with "the input
+device is not a TTY" and never reaches the doctor at all. The host binary is the
+fallback, for a dev box running from a venv.
+
+A peer that cannot be reached, or that answers something other than a doctor
+payload, is **one failed check** naming what was tried (`peer.ssh`) rather than an
+exception or a silent empty report. A peer running a release whose doctor is still
+the old stub gets its own failed check (`peer.version`) saying so, which is the
+common answer mid-rollout.
+
+## `--fix`
+
+```bash
+ainode doctor --fix
+```
+
+Applies **only what cannot lose anything**. Safe means reversible or additive:
+
+| Repair | What it does |
+|---|---|
+| Create a missing directory | `mkdir -p`, for example the models dir |
+| Tighten the secrets store | `chmod 0600` |
+| Write the fleet discovery port | One key into `config.json`, every other key untouched, atomically |
+
+Then it **re-runs the checks**, so the report describes the node as it is now
+rather than as it was before the fixes landed, prints what it fixed, and lists
+everything still left for a human.
+
+Anything that pulls an image, restarts a service or edits a systemd unit is
+listed, never done.

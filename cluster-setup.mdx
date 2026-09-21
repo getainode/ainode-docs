@@ -34,6 +34,20 @@ curl -fsSL https://ainode.dev/install | bash -s -- --job worker
 Every node should run the same AINode release. Without `-s -- --job master`,
 `AINODE_PEERS` gives you a solo node with SSH keys copied and nothing else.
 
+### Or join an existing cluster with one command
+
+On a cluster that already exists, do not hand-edit the new node's `config.json`.
+Mint a token on the master and paste one line on the new box:
+
+```bash
+ainode cluster token                     # on the master
+ainode join <master-host>:3000 <token>   # on the new node
+```
+
+That writes the cluster id, the cluster secret, the master's address, the discovery
+port and the member role, and restarts the service. `AINODE_JOIN` does it as part of
+the install. See [Joining a node](/cluster/joining).
+
 ## Step 2: Open the cluster UI
 
 Navigate to `http://<master-ip>:3000` and open the **Cluster** tab. Nodes
@@ -105,5 +119,17 @@ A selected node is not an online member, or it broadcasts no fabric IP. Set
 `cluster_interface` in that node's `config.json` and restart it.
 
 **Workers not appearing in topology**  
-Confirm the discovery port is open. All nodes must be on the same broadcast
-domain (same L2 subnet) and share the same `cluster_id`.
+Run `ainode doctor` on both nodes first: it checks the discovery port, the cluster
+id, the peers it can see and their versions. All nodes must be on the same broadcast
+domain (same L2 subnet), share the same `cluster_id`, and share the same
+`cluster_secret`, because two nodes installed independently each generate their own
+and are invisible to each other. See [Signed discovery](/security/discovery).
+
+**The fleet is running two releases**  
+Every node announces its version, and the dashboard draws a banner naming each
+release and the nodes on it. See [Versions on the wire](/cluster/versions).
+
+**A head came back without its multi-node model**  
+It adopts the engine container it is still running, relaunches the recorded shape
+once when every peer answers an ssh probe, or marks the record degraded and names
+the peer that did not. See [A head across a restart](/cluster/head-restart).

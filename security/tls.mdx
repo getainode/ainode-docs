@@ -1,0 +1,197 @@
+---
+title: "TLS"
+description: "Serve HTTPS on a second port with a self-signed certificate, a pair you already have, or a real Let's Encrypt certificate on the tailnet."
+icon: "lock"
+---
+
+TLS is off by default. When you turn it on, the node serves HTTPS on **its own
+port** and leaves plain HTTP exactly where it was, because every client in a
+fleet already talks to the HTTP port and a cluster cannot be cut over one node
+at a time.
+
+## Turn it on
+
+```bash
+ainode tls enable          # generate a self-signed pair
+ainode tls status          # what is served, and when the certificate expires
+ainode tls disable         # stop serving HTTPS; the pair is kept
+```
+
+`ainode tls enable` takes:
+
+| Flag | What it does |
+|---|---|
+| `--cert PATH --key PATH` | Install a pair you already have. Both or neither; one alone is an error |
+| `--tailscale` | Run `tailscale cert` for a real Let's Encrypt certificate on this node's MagicDNS name |
+| `--port N` | The TLS port. Default **3443**. Refused when it is already the HTTP port |
+
+The listener is built at boot, so enabling TLS prints the restart you need:
+
+```bash
+sudo systemctl restart ainode    # or: docker restart ainode
+```
+
+## What stays on 3000
+
+Everything. The HTTP port in `web_port` (3000 by default) is untouched by
+`ainode tls enable`: the dashboard, `/v1`, `/api` and `/metrics` all keep
+answering there. HTTPS on 3443 is an **additional** listener, not a
+redirect and not a replacement. A fleet whose nodes route to each other over
+HTTP keeps working while you add TLS to one node.
+
+The node **always binds HTTP first**, and opens the TLS listener only when all four
+of these hold: it is enabled, the port differs from the HTTP port, both files
+exist, and they load. Any TLS problem logs the reason, says *serving HTTP only*,
+and HTTP carries on. Enabling TLS cannot be the reason a node has no web server.
+
+Two things stay HTTP regardless:
+
+- **The engine port** (8000 by default), which is a vLLM container and not this
+  server.
+- **Peer to peer traffic** inside the cluster.
+
+3443 is deliberately not 443: the server does not run as root, and a port above
+1024 keeps `ainode tls enable` from needing sudo. The image `EXPOSE`s 3000, 3443,
+8000 and 5679/udp, and the systemd unit runs with `--network=host`, so no port
+mapping is involved.
+
+## The three ways to get a certificate
+
+### Self-signed (the default)
+
+With no flags, `ainode tls enable` generates one self-signed leaf: RSA 2048,
+SHA-256, **825 days** of validity (the ceiling Apple and the CA/Browser Forum
+accept), CN set to the first DNS SAN and O to `AINode`. It uses the `cryptography`
+library when it is importable and shells out to `openssl` otherwise.
+
+The SAN list is generous on purpose, because a certificate with no matching SAN is
+a certificate every modern client refuses, and these nodes get reached by several
+names:
+
+- the hostname, the FQDN and the short forms of both,
+- `localhost`,
+- **every non-loopback, non-link-local IPv4 address on the box**, docker bridges
+  included, which is what covers the LAN address and the tailnet address,
+- `127.0.0.1`.
+
+The key is written mode **0600**, the certificate 0644, and the directory 0700.
+
+An existing pair in that directory is **overwritten without a prompt**.
+
+A self-signed certificate needs `curl -k`, or the certificate added to the
+client's trust store. The command says so when it finishes.
+
+### A pair you already have
+
+```bash
+ainode tls enable --cert /path/to/fullchain.pem --key /path/to/privkey.pem
+```
+
+Both files are **copied** into `<AINODE_HOME>/tls/` rather than referenced.
+That is the point: the server runs in a container that only bind-mounts that
+one directory, so a path like `/etc/letsencrypt/live/...` does not exist inside
+it and the node would come up with TLS enabled and no certificate. The copied
+key is re-hardened to 0600.
+
+### Tailscale, for a real certificate
+
+```bash
+ainode tls enable --tailscale
+```
+
+This reads the node's MagicDNS name from `tailscale status --json` (`Self.DNSName`)
+and asks `tailscale cert` for a Let's Encrypt certificate on it. That is what a Mac
+client with App Transport Security needs: ATS will not accept a self-signed
+certificate, so a native macOS app cannot talk to a self-signed node at all.
+
+HTTPS must be enabled for the tailnet first (Tailscale admin console, **DNS**,
+**HTTPS Certificates**), or the command says so and exits.
+
+<Note>
+Run from inside the AINode container, `--tailscale` cannot work: the image ships
+no `tailscale` binary and the tailnet daemon socket is not mounted. The command
+detects this and prints the two commands to run **on the host** instead, with
+the host paths already filled in, followed by the `ainode tls enable --cert ...
+--key ...` line to run afterwards. `<AINODE_HOME>/tls` in the container is the
+same directory as `~/.ainode/tls` on the host, so the server reads what
+tailscale wrote.
+</Note>
+
+## Where the pair lives
+
+`<AINODE_HOME>/tls/` (`~/.ainode/tls/` on a normal install), as `cert.pem` and
+`key.pem`. It is the one directory the host bind-mounts into the container, so
+it is the only place a file the CLI writes is also a file the server can read.
+
+## The `tls` block in `config.json`
+
+`ainode tls enable` writes one key and leaves every other key in the file
+exactly as it found it (atomically, via a temp file and a rename):
+
+```json
+{
+  "tls": {
+    "enabled": true,
+    "cert_file": "/root/.ainode/tls/cert.pem",
+    "key_file": "/root/.ainode/tls/key.pem",
+    "port": 3443
+  }
+}
+```
+
+A missing key, a null or a string port all resolve to the default rather than
+raising, because this block is read on the boot path: a typo here must not be
+the reason a node has no web server at all. The node opens a TLS listener only
+when `enabled` is true **and** both files are readable right now.
+
+`ainode tls disable` flips `enabled` to false and deletes nothing.
+
+## What reports the state
+
+`ainode tls status` prints whether TLS is enabled, the port, the HTTP port
+beside it, and for the configured certificate whether it is self-signed or
+CA-issued, when it expires, how many days are left, and its SAN list.
+
+`GET /api/status` carries a `tls` block, which is what the dashboard's
+**Config, API access** panel reads:
+
+| Field | Meaning |
+|---|---|
+| `enabled` | From the config block |
+| `port` | The TLS port |
+| `cert_file` | The configured certificate path |
+| `cert_expires` | The **earliest** `notAfter` in the file |
+| `cert_days_left` | Days until that |
+| `self_signed` | Whether it is self-signed |
+| `label` | One sentence for the dashboard |
+
+`label` is one of: `HTTP only, no TLS on this node`, `TLS enabled with no
+certificate configured`, `TLS enabled but <file> is not there`, `TLS enabled,
+certificate unreadable: <error>`, `HTTPS on <port>, self-signed certificate`, or
+`HTTPS on <port>, CA-issued certificate`.
+
+The dashboard no longer claims there is no TLS. **Config, API access** used to read
+out a fixed sentence saying a key travels in plain text; it reads this block now,
+including the certificate's kind and expiry, and says so plainly when the browser
+has no key to read `/api/status` with.
+
+<Warning>
+**Nothing renews a certificate automatically.** A self-signed pair lasts 825 days
+and a `tailscale cert` pair is a Let's Encrypt certificate with a Let's Encrypt
+lifetime. Watch the `ainode doctor` warning and re-run `ainode tls enable`, then
+restart the node.
+</Warning>
+
+## What `ainode doctor` says
+
+The `tls.enabled` check reports:
+
+| State | Verdict |
+|---|---|
+| TLS off | **WARN**: the dashboard, the API and any key travel in clear text on the HTTP port. Not a FAIL, because off is the default and is fine on a LAN or a tailnet |
+| Enabled with no certificate configured, or the file is not there | **FAIL**: the port never opens |
+| Certificate expires in 14 days or fewer | **WARN** |
+| Certificate already expired | **FAIL**: every HTTPS client is refusing this node |
+| Otherwise | **OK**, naming the port, the kind and the days left, with the HTTP port beside it |
+
+See [Doctor](/ops/doctor) for the rest of the report.

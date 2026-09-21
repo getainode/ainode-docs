@@ -31,20 +31,40 @@ vLLM's own `vllm:*` metrics, not the documented `ainode_*` set; those are on
 Disabled by default. Enable for internet-exposed instances:
 
 ```bash
-ainode auth enable    # generates an API key
-ainode auth new-key   # rotate
+ainode auth enable    # turn it on, minting a first key if there is none
+ainode auth new-key   # mint another
+ainode auth status
+ainode auth disable
 ```
 
-Pass the key as `Authorization: Bearer <key>` on all `/v1/*` requests. The
-same controls exist over HTTP:
+Or from the dashboard, under **Config, API access**, which also shows the keys
+that exist with a Revoke on each and takes a pasted key on a fresh browser.
+
+With auth on, **every path under `/api` and `/v1` needs the key**, as
+`Authorization: Bearer <key>`. Five paths and the static shell stay open; see
+[API keys](/security/api-keys) for the list and the reason for each. `/metrics`
+is not one of them.
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/auth/status` | Whether API-key auth is on, and the keys that exist (never their values) |
-| `POST /api/auth/enable` | Turn API-key auth on |
+| `GET /api/auth/status` | Whether API-key auth is on, and how many keys exist (never a key or a hash). Answers without a key |
+| `POST /api/auth/enable` | Turn API-key auth on. Returns the minted key once, or `key: null` when the node already had one |
 | `POST /api/auth/disable` | Turn it off |
+| `GET /api/auth/keys` | The key ids |
 | `POST /api/auth/keys` | Create a key; the value is returned once |
 | `DELETE /api/auth/keys/{key_id}` | Revoke a key |
+
+`GET /api/status` carries an `auth` block whose `label` is the sentence the
+dashboard chip shows: `API key required`, `API open, key set but not required`, or
+`API open, no key set`.
+
+## Transport
+
+Plain HTTP on port 3000 by default. `ainode tls enable` adds an HTTPS listener on
+**3443** and leaves 3000 exactly where it was. See [TLS](/security/tls).
+
+Per-client rate limits on `/v1` are available and off by default. See
+[Rate limits](/security/rate-limits).
 
 ## Inference endpoints
 
@@ -58,8 +78,85 @@ failover, keyed on the body's `model`. Details on [Chat & Completions](/api-refe
 | `/v1/embeddings` | POST | Embeddings, routed fleet-wide to a vLLM pooling instance serving the requested embedding model |
 | `/v1/messages` | POST | Anthropic Messages shape, forwarded by the same proxy as chat completions (query strings such as `?beta=true` are forwarded) |
 | `/v1/messages/count_tokens` | POST | Token count for an Anthropic-shaped body, through the same proxy |
-| `/v1/decide` | POST | Typed questions in, probabilities out: a state, an optional instruction, and a map of questions; every question is answered at once with `answer`, `confidence`, `distribution` and `latency_ms` |
+| `/v1/decide` | POST | Typed questions in, probabilities out: a state, an optional instruction, and a map of questions; every question is answered at once with `answer`, `confidence`, `distribution` and `latency_ms`. Not a forwarded path: it composes several grammar-constrained chat completions of its own, and routes with the proxy's candidate list |
+| `/v1/responses` | POST | The OpenAI Responses API. Streams |
+| `/tokenize` | POST | Token ids for a prompt or a chat body. **Not under `/v1`**, because vLLM does not serve it there. Answered by chat and pooling engines alike |
+| `/detokenize` | POST | Text back from token ids. Also not under `/v1` |
+| `/v1/rerank` | POST | Rerank documents against a query. A pooling-model path, so it lives on an embedding engine |
+| `/v1/score` | POST | Score pairs. Also a pooling-model path |
+| `/v1/audio/transcriptions` | POST | Speech to text. **multipart/form-data**, with the model in a `model` form field. See [Audio](/api-reference/audio) |
+| `/v1/audio/translations` | POST | The same, translating into English |
 | `/v1/models` | GET | On `3000`: the federated union of models across the fleet. On `8000`: only that engine's model |
+
+The five paths from `/v1/responses` through `/v1/score` were added in 0.5.27.
+Port 3000 answered 404 for all five before that, so a caller who wanted a token
+count, a Responses call or a rerank had to abandon fleet routing and address one
+engine's port directly, losing the model-id lookup and the failover with it. The
+list is what `curl http://<node>:<port>/openapi.json` returns on the fleet,
+checked against vLLM 0.27.1 (chat) and the 0.17.0 pooling engine stacked beside it,
+so nothing is registered that an engine would 404 anyway.
+
+### `/v1/embeddings` is routed by its own handler
+
+It is not on the shared proxy, because it validates the body before forwarding: a
+request without a JSON object carrying a string `model` is a **400**. It then
+reuses the proxy's candidate list, posts the verbatim body with failover on
+transport errors, and returns every HTTP status untouched. When no node can be
+reached it answers **502** with `no reachable node is serving '<model>'`. Only when
+nothing in the fleet serves that id at all does it fall back to the in-process
+sentence-transformers manager, which on the shipped container image answers **503**
+`dependency_missing`.
+
+<Warning>
+Two consequences of that separate handler, both open as
+[issue #241](https://github.com/getainode/ainode/issues/241): the embeddings hop
+does **not** set `X-AINode-Served-By`, and it does **not** read the pinning headers
+or the body field. Everything below about pinning and `X-AINode-Served-By` applies
+to the eleven paths on the shared proxy, not to `/v1/embeddings`.
+</Warning>
+
+### Pinning a request to one instance
+
+With the same model on two nodes, routing on the model id alone picks the local
+hop first, so the answer could come from an engine you did not choose. Pin it:
+
+| Where | What |
+|---|---|
+| `X-AINode-Node: <node_id>` | Pin the node. With no port, its primary engine port |
+| `X-AINode-Port: <port>` | Pin the port. With no node, a stacked instance on this node |
+| `"ainode_target": "<node_id>:<port>"` in the body | The same pin as a body field. Stripped before forwarding, because it is AINode's field and not vLLM's |
+
+A pin is honoured **exactly**: one candidate, **no failover**, because the point of
+pinning is that the answer is attributable to that engine. An unknown node id is a
+**404** with `"code": "unknown_node"`, never a quiet fall back to the local engine.
+
+**Every response from the shared proxy carries `X-AINode-Served-By: host:port`**,
+naming the instance that actually answered, on both the streaming and the
+non-streaming path, and the header is listed in `Access-Control-Expose-Headers` so
+a browser can read it. The chat view records it per turn instead of echoing the
+pick.
+
+The host is the literal `localhost` for the local hop and the peer's `fabric_ip`
+for a remote one, so a local answer reads `localhost:8000`.
+
+### Candidate ordering
+
+With nothing pinned, a request goes to the members whose status is online,
+serving or member-ready: **this node first** (its primary port, then each stacked
+instance's port), then the remote peers in cluster order. With no candidate at all
+the answer is a **404** `model_not_found` naming the model, when the fleet has
+members.
+
+Candidates are **reordered by capability only for a multimodal request**: a chat
+completions or Messages body whose `messages` carry an `image_url`,
+`input_audio`, `video_url` or `file` part, or an Anthropic `image` or `document`
+block. Instances known to serve vision go first, never-probed ones next, and known
+refusers are dropped; when nothing is left the answer is a **400** with
+`"code": "no_multimodal_instance"`. A live 400 from an engine that says it accepts
+no images is recorded in the capability cache and failed over.
+
+That ordering therefore never fires for `/v1/responses` (whose body uses `input`),
+`/tokenize`, `/detokenize`, `/v1/rerank` or `/v1/score`.
 
 ## Management endpoints
 
@@ -69,19 +166,22 @@ failover, keyed on the body's `model`. Details on [Chat & Completions](/api-refe
 | `GET /api/health` | Liveness check |
 | `GET /api/nodes` | All discovered cluster nodes (incl. per-node `instances[]`) |
 | `GET /api/cluster/info` | Cluster topology |
-| `GET /api/cluster/resources` | Aggregated memory + GPU counts across the cluster (one GPU per node) |
+| `GET /api/cluster/resources` | Aggregated memory + GPU counts across the cluster. A multi-GPU node counts as all of its GPUs (`gpu_count` off the announcement) |
 | `POST /api/cluster/load` | Load a model on any one node (`{node_id, model, ...}`) |
 | `POST /api/cluster/unload` | Unload a model on any node (`{node_id, model}`) |
 | `POST /api/sharding/launch` | Launch one model across several nodes (`{model, node_ids}`); see [Cluster API](/api-reference/cluster) |
-| `GET /api/sharding/plan` | Preview a multi-node launch for a model |
 | `GET /api/sharding/status` | The distributed instances on this node |
+| `GET /api/cluster/endpoint` | The fleet's addresses: this node, the master, every online member. **Needs no API key.** See [Surviving the master](/cluster/endpoint) |
+| `POST /api/cluster/join` | Join a node using a token. On the **master**, and the one other route that needs no API key. See [Joining a node](/cluster/joining) |
+| `POST /api/cluster/join-self` | The same join performed by the joiner, behind the key rule |
 | `POST /api/cluster/update-all` | Cluster-wide pull + image swap (workers first, master last, over HTTP) |
 | `GET /api/cluster/update-status` | Live per-node update progress |
 | `POST /api/cluster/role` | Set this node's cluster/distributed role |
 | `POST /api/cluster/id` | Set this node's cluster id |
 | `GET /api/metrics` | JSON metrics snapshot |
+| `GET /api/metrics/history` | Any retained series over any window. See [Metrics retention](/ops/metrics-retention) |
 | `GET /metrics` | Prometheus text exposition (`ainode_*`) |
-| `POST /api/engine/set-model` | Switch active model (legacy single-model restart path) |
+| `POST /api/engine/set-model` | **Destructive boot-config route.** It stops whatever the node is serving, including stacked instances it has no accounting of, and with no engine object at all it saves the config and starts nothing. Nothing in the UI calls it; use `POST /api/cluster/load` |
 | `POST /api/engine/update` | Pull a target image, pin it, and self-restart onto it |
 | `GET /api/version/check` | Check for a newer version on GHCR |
 | `GET /api/config` | Read node config |
@@ -99,14 +199,6 @@ The Server view's console, one node at a time.
 | `DELETE /api/server/logs` | Clear it |
 | `POST /api/server/models/{model_id}/eject` | Stop one instance and leave the rest running |
 
-### Onboarding
-
-| Endpoint | Description |
-|---|---|
-| `GET /api/onboarding/status` | Whether this node has been onboarded. The installer writes `onboarded: true`, so an installer install starts past this |
-| `GET /api/onboarding/suggestions` | Model suggestions for the detected GPU |
-| `POST /api/onboarding/complete` | Record the answers and mark the node onboarded |
-
 ### Other groups
 
 - **Models and downloads**: [Models API](/api-reference/models), including
@@ -114,8 +206,18 @@ The Server view's console, one node at a time.
   model management routes.
 - **Training, datasets and AutoData**: [Training API](/api-reference/training).
 - **Bench**: [Bench API](/api-reference/bench).
+- **Audio**: [Audio](/api-reference/audio).
 - **Secrets** (`/api/secrets`, `/api/secrets/{key}`, `/api/secrets/{key}/test`,
   `/api/secrets/custom/{name}`): [Tokens & Secrets](/guides/secrets).
+
+<Note>
+The browser onboarding wizard and its three `/api/onboarding/*` routes were
+removed in 0.5.29. No deployed node could reach them: the installer writes
+`"onboarded": true` and every non-TTY start sets it before the server binds, so
+`/onboarding` answered a redirect to a page that redirected straight back. Joining
+is [`ainode join`](/cluster/joining) and a card in **Config, Cluster**. The
+terminal wizard on a TTY `ainode start` is unchanged.
+</Note>
 
 <Note>
 The deploy path is `POST /api/cluster/update-all` (or

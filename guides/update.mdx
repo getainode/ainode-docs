@@ -11,11 +11,163 @@ ainode update
 ```
 
 Run it **as the service user** (the account that ran the installer), not through
-`sudo`. It resolves the **highest numeric GHCR tag** and pulls *that pinned
-tag*; it never pulls a floating `:latest`. It then writes `~/.ainode/image.env`
-(atomically, via temp file + rename) so the systemd unit boots the new image,
-and restarts the service. Models, config, and training artifacts are not
-touched.
+`sudo`. `ainode update` is the one command the host wrapper at
+`/usr/local/bin/ainode` handles itself rather than forwarding into the container,
+because it restarts that container.
+
+It does six things, in order:
+
+1. Resolve the **highest numeric GHCR tag** (or use the version you named) and
+   `docker pull` that pinned tag. It never pulls a floating `:latest`.
+2. Write `AINODE_IMAGE=<image>` into `~/.ainode/image.env`, atomically via a temp
+   file and a rename, so the systemd unit boots the new image. It prints the path:
+   `==> Pinned ... in /home/<user>/.ainode/image.env`.
+3. Restart the service.
+4. **Verify** that the node came back on the new version.
+5. **Prune** the images the new one replaced, only after that verification passes.
+6. Print `==> Update complete. Version: <version>`.
+
+Models, config, and training artifacts are not touched.
+
+## Step 4: it verifies, and fails when the update did not apply
+
+`ainode update` used to print "Update complete" and exit 0 whatever happened,
+because nothing ever asked the running node what version it was. The sudo-home bug
+was invisible for exactly that reason, and so was every other way an old container
+can come back.
+
+After the restart the wrapper polls this node's own
+`http://127.0.0.1:<web_port>/api/status` **every 3 seconds** until it reports the
+version just installed, for up to **180 seconds**
+(`AINODE_UPDATE_VERIFY_TIMEOUT`). On success:
+
+```
+==> Node is serving 0.5.29
+```
+
+When it does not come back on the new version, nothing is removed and it **exits
+non-zero**, printing what the node actually reports and what to check:
+
+```
+XX Update did NOT apply. 0.5.29 was pulled and pinned in
+   /home/sem/.ainode/image.env, but after the restart /api/status reports '0.5.28'.
+   Nothing was removed. Check: systemctl status ainode; docker ps;
+   grep AINODE_HOME /etc/systemd/system/ainode.service
+```
+
+A node whose service was **not running** is pinned and left alone, and says so
+instead of claiming an update:
+
+```
+==> Pulled and pinned, but the service is not running, so nothing
+    was restarted and no old image was removed.
+    Start it with: sudo systemctl start ainode
+```
+
+<Warning>
+One case still exits 0 without verifying: when GHCR cannot be reached and you named
+no version, the wrapper pulls the baked default `:latest`, says
+`!! Could not resolve a version`, restarts, and has no target to verify against. It
+does not print `Update complete`, but it does not fail either. Name a version
+explicitly on a node with no reliable route to GHCR.
+</Warning>
+
+## Step 5: it removes the images it replaced
+
+`ainode update` pulled a release every time and never removed the one it replaced,
+so a node carried every release it had ever run under each of the names the image
+is mirrored as: **180 images and 226 GB reclaimable** on one Spark, on a root
+filesystem at 82 percent, on a box whose whole job is holding 35 to 400 GB of model
+weights.
+
+The prune runs **strictly after** the new version is confirmed serving, so a failed
+update still has something to fall back to. It keeps **one rollback generation** by
+default, so `ainode update <older>` has a release to go back to:
+
+```bash
+ainode update --keep-images 2      # keep two generations below the new one
+AINODE_KEEP_IMAGES=0 ainode update # keep none
+```
+
+A prune that fails is not fatal: it says
+`!! Could not prune; images were left alone. Retry: ainode prune-images`.
+
+## `ainode prune-images`
+
+The reclaim step as its own command, so it can be run by hand on a node that has
+been updated many times, and so the update path has one place to call.
+
+```bash
+ainode prune-images --dry-run --verbose
+ainode prune-images --keep-images 2
+```
+
+| Flag | What it does |
+|---|---|
+| `--keep-images N` | Rollback generations to keep below the running release. Default **1**; a negative clamps to 0 |
+| `--current IMAGE` | Name the baseline instead of resolving it |
+| `--dry-run` | Print the decision and remove nothing |
+| `--verbose` | Also print every image it keeps, and why |
+| `--images-from FILE` | Decide against a `docker images` listing copied from another node. **Implies `--dry-run`**, which is how a prune can be reviewed for a node you are not on |
+
+The baseline resolves in this order: `AINODE_IMAGE` in
+`$AINODE_HOME/image.env` (what the systemd unit actually reads), then the
+`$AINODE_IMAGE` environment variable, then this build's own GHCR tag. With none of
+them it says `Cannot tell which image this node runs.` and exits 1.
+
+### The decision rules
+
+They live in `core/image_prune.py` as a pure function of a `docker images`
+listing, so the decision can be read and tested with no docker daemon anywhere
+near it.
+
+**Considered:** only AINode's own app-image repositories. `ainode-base`, engine
+images and everything else on the host are never touched: a node's engine images
+are what it serves models with, and deleting one costs a multi-gigabyte pull.
+
+**Kept:**
+
+- The running release, and the same version under another repository name.
+- Any tag sharing the running image's id.
+- Anything **newer** than the running release. An operator who pre-pulled the next
+  release has not asked us to undo that.
+- `--keep-images N` rollback generations below the running release, counted in
+  **distinct releases across all of those repositories together**, so the default
+  of 1 leaves exactly one generation with every name it has.
+- Any tag that is not a release. A release tag is exactly three dotted numbers;
+  `latest`, `dev` and a sha are somebody's pointer, and their bytes are shared with
+  a release tag anyway.
+
+**Removed by `repo:tag`, never by image id.** The same image is tagged under
+several repositories, and `docker rmi <id>` would take all of them at once,
+including a tag this node is running on. A refusal from docker is logged and is not
+fatal.
+
+**Nothing is decided at all** when the baseline has no release tag, or when its
+`repo:tag` is not in the listing: that means the pull did not land or the wrong
+listing was handed in, and pruning against an unknown baseline is how a node loses
+the image it is running.
+
+<Note>
+The freed figure is an **upper bound** and says so. `docker images` reports each
+image's full size including layers it shares with others, so summing them
+overcounts whatever was shared. Against a real listing from one Spark with one
+rollback generation kept, the decision removes four tags for 19.6 GB.
+</Note>
+
+## Disk figures
+
+`GET /api/status` carries a `disk` block with a `home` and a `models` entry, each
+with `path`, `total_gb`, `free_gb`, `free_fraction` and a `warn` flag that is true
+below **15 percent** free. A full models filesystem is the one resource failure on
+these nodes that reads as "the engine died": the pull stops part way and vLLM never
+binds.
+
+The warning state is decided server-side so the dashboard tooltip and
+`ainode doctor` cannot disagree about what low means. A path that cannot be
+`stat`ed reports `null` for the three figures rather than zero, because unknown and
+full are different answers. The models figure is also on the node's tooltip in the
+cluster graphic.
 
 ## Run it as the service user
 
@@ -54,8 +206,10 @@ AINode's systemd unit reads the image tag from `~/.ainode/image.env` via an
 
 Because the tag lives in `image.env` and the unit restarts on its own, a node
 survives a **cold power cycle** and comes back on the pinned image with
-**automatic model replay** (a distributed multi-node instance is not replayed;
-relaunch it).
+**automatic model replay**. A distributed head adopts the engine container it is
+still running, or relaunches the recorded shape once when every peer answers, or
+says which peer did not; see
+[A head across a restart](/cluster/head-restart).
 
 <Note>
 Units that predate the swappable-image unit will pull and pin the new image but
@@ -77,6 +231,13 @@ If the `docker pull` fails, the node keeps running its current image: no
 half-updated state.
 </Note>
 
+## Watch for a split fleet
+
+A partial roll leaves the cluster running two releases, which used to look exactly
+like a cluster running one. Every node now announces its version, and the dashboard
+draws a banner naming each release and the nodes on it. See
+[Versions on the wire](/cluster/versions).
+
 ## Update the entire cluster at once
 
 From the master node's web UI, the **CLUSTER pill** (top of the topology view)
@@ -89,6 +250,20 @@ pull + restart. The master updates last."* Click it to:
    upgrade.
 3. Watch per-node progress live via `GET /api/cluster/update-status` (pending,
    updating, done / failed).
+
+The job's state is written to `<AINODE_HOME>/cluster-updates.json` on every
+mutation, so it survives the restart the job itself causes. The master updates the
+workers first and self-stops last, so the record used to die with the process that
+was reporting on it and a poll after the master came back got a 404 for a job that
+had fully succeeded. Job ids are wall-clock stamps, so "the most recent job" still
+means that across a restart.
+
+The poll additionally reports the version each node is announcing **right now**
+against the target, with `on_target` per node and a `verified` flag for the whole
+job. Whether a node came back on the new image is a live question, not one a record
+written moments before a container stopped gets to answer. Either is `null` where it
+cannot be told (no target, or a node not announcing a version) rather than `false`,
+which would read as failure.
 
 This is the recommended way to keep a multi-node cluster in sync. Every node
 should run the same release.
