@@ -28,22 +28,32 @@ vLLM's own `vllm:*` metrics, not the documented `ainode_*` set; those are on
 
 ## Authentication
 
-Disabled by default. Enable for internet-exposed instances:
+**On by default since 0.5.30.** A fresh install mints one key, requires it, and
+prints it once at the end of the install; `AINODE_AUTH=off` at install time keeps
+the previous open node. An install over an existing config changes neither the state
+nor the keys.
 
 ```bash
-ainode auth enable    # turn it on, minting a first key if there is none
-ainode auth new-key   # mint another
-ainode auth status
-ainode auth disable
+ainode auth status                       # is it on, how many keys
+ainode auth key create --name <client>   # mint a key for one client, printed once
+ainode auth key list                     # which client holds which key
+ainode auth key revoke <id>              # take one away
+ainode auth enable | ainode auth disable # require a key, or stop requiring one
 ```
 
-Or from the dashboard, under **Config, API access**, which also shows the keys
-that exist with a Revoke on each and takes a pasted key on a fresh browser.
+Every one of those is live: the server re-reads `auth.json` when it changes, so
+nothing needs a restart. Or use the dashboard, under **Config, API access**, which
+also shows the keys that exist with a Revoke on each and takes a pasted key on a
+fresh browser.
 
 With auth on, **every path under `/api` and `/v1` needs the key**, as
 `Authorization: Bearer <key>`. Five paths and the static shell stay open; see
 [API keys](/security/api-keys) for the list and the reason for each. `/metrics`
 is not one of them.
+
+Nodes authenticate to each other with a key derived from the cluster's shared
+secret, so a whole fleet can run with auth on and a joined node needs no key of its
+own.
 
 | Endpoint | Description |
 |---|---|
@@ -61,7 +71,11 @@ dashboard chip shows: `API key required`, `API open, key set but not required`, 
 ## Transport
 
 Plain HTTP on port 3000 by default. `ainode tls enable` adds an HTTPS listener on
-**3443** and leaves 3000 exactly where it was. See [TLS](/security/tls).
+**3443** and leaves 3000 exactly where it was, and
+`ainode tls enable --tailscale` gets a real Let's Encrypt certificate for the
+node's tailnet name in one command, with a host timer that renews it. A node that
+serves HTTPS says so in `tls`, `tls_port` and an `https` `url` on
+`/api/cluster/endpoint` and `endpoint_hint`. See [TLS](/security/tls).
 
 Per-client rate limits on `/v1` are available and off by default. See
 [Rate limits](/security/rate-limits).
@@ -162,9 +176,9 @@ That ordering therefore never fires for `/v1/responses` (whose body uses `input`
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/status` | Node status, GPU info, engine state |
-| `GET /api/health` | Liveness check |
-| `GET /api/nodes` | All discovered cluster nodes (incl. per-node `instances[]`) |
+| `GET /api/status` | Node status, GPU info, engine state. Carries `engine_adopted`, true when the engine on this node's own port survived the last restart rather than being relaunched ([adoption](/cluster/adoption)) |
+| `GET /api/health` | Liveness check, and the one route that answers with no key. `{"status": "ok", "version": "<running release>"}`, which is what `ainode update` verifies against |
+| `GET /api/nodes` | All discovered cluster nodes (incl. per-node `instances[]`, each carrying `adopted` on a clustered node) |
 | `GET /api/cluster/info` | Cluster topology |
 | `GET /api/cluster/resources` | Aggregated memory + GPU counts across the cluster. A multi-GPU node counts as all of its GPUs (`gpu_count` off the announcement) |
 | `POST /api/cluster/load` | Load a model on any one node (`{node_id, model, ...}`) |
@@ -179,7 +193,7 @@ That ordering therefore never fires for `/v1/responses` (whose body uses `input`
 | `POST /api/cluster/role` | Set this node's cluster/distributed role |
 | `POST /api/cluster/id` | Set this node's cluster id |
 | `GET /api/metrics` | JSON metrics snapshot |
-| `GET /api/metrics/history` | Any retained series over any window. See [Metrics retention](/ops/metrics-retention) |
+| `GET /api/metrics/history` | Any retained series over any window, for this node or, with `?node=<id or name>`, any node in the fleet. See [Metrics retention](/ops/metrics-retention) |
 | `GET /metrics` | Prometheus text exposition (`ainode_*`) |
 | `POST /api/engine/set-model` | **Destructive boot-config route.** It stops whatever the node is serving, including stacked instances it has no accounting of, and with no engine object at all it saves the config and starts nothing. Nothing in the UI calls it; use `POST /api/cluster/load` |
 | `POST /api/engine/update` | Pull a target image, pin it, and self-restart onto it |

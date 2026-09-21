@@ -60,6 +60,16 @@ the pooling engine at `:8001`. The paths above are the ones that router declares
 in the engine image the Whisper catalog entry pins (vLLM 0.17.1).
 </Note>
 
+## The first request after a launch is slow
+
+On `--enforce-eager`, which the Whisper recipe states, the first transcription
+after an engine comes up compiles the kernels. Measured by hand on Spark-4:
+**89 seconds** for that request, against 0.7 for every one after it. Send one
+throwaway clip before you point a user at a fresh instance. The
+[speech bench](/guides/tested-models#speech-runs) takes exactly one untimed
+warm-up request for this reason and records it rather than folding it into the
+numbers.
+
 ## What comes back
 
 Whatever the engine returns, with the response status and `Content-Type` passed

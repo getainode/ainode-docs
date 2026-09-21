@@ -11,7 +11,7 @@ description: "Prometheus exposition, the JSON snapshots, and the retained histor
 | `GET http://localhost:3000/api/metrics` | JSON | Full snapshot |
 | `GET http://localhost:3000/api/metrics/gpu` | JSON | GPU stats only, including the per-device list |
 | `GET http://localhost:3000/api/metrics/requests` | JSON | Request stats with latency percentiles |
-| `GET http://localhost:3000/api/metrics/history` | JSON | Any series over any window, from `<AINODE_HOME>/metrics.db`. See [Metrics retention](/ops/metrics-retention) |
+| `GET http://localhost:3000/api/metrics/history` | JSON | Any series over any window, from `<AINODE_HOME>/metrics.db`, for this node or (with `?node=`) any node in the fleet. See [Metrics retention](/ops/metrics-retention) |
 
 <Note>
 AINode's Prometheus exposition, every `ainode_*` metric, is served by the
@@ -57,8 +57,8 @@ a commented set of recording and alerting rules. Tested against Prometheus 2.x a
 VictoriaMetrics; the format is `text/plain; version=0.0.4`, which every
 Prometheus-compatible scraper reads.
 
-**Replace its `static_configs` targets with your own node addresses.** The file
-ships with the addresses of the fleet it was written against.
+**Replace its `static_configs` targets with your own node addresses.** They are
+placeholders, not a fleet you can scrape.
 
 ## Identity labels
 
@@ -80,15 +80,14 @@ Prefer `node_id` over `instance`: an address changes when a node moves, a
 | `ainode_tokens_generated_total` | counter | Total tokens generated |
 | `ainode_tokens_per_second` | gauge | Mean over process life |
 | `ainode_requests_by_model_total{model}` | counter | Per-model request counts |
-| `ainode_request_latency_milliseconds{quantile}` | summary | P50 / P95 / P99, pre-computed by the collector. Always emitted, as `0.0` when no request has been timed |
-| `ainode_request_latency_milliseconds_count` | summary | Request count |
-| `ainode_request_latency_milliseconds_sum` | summary | **Always `0`**: the exact sum is not tracked. It exists so a recording rule can be written, not so `sum/count` means anything |
-| `ainode_gpu_available` | gauge | **Only ever emitted as `0`**, and only when the GPU block carries an error, so Grafana shows a value rather than "No data" when the GPU is unreachable. There is no `1` line on a healthy node: the four GPU gauges above being present is what says the GPU answered |
+| `ainode_request_latency_milliseconds{quantile}` | summary | P50 / P95 / P99, pre-computed by the collector. **Absent until a request has been timed**, HELP and TYPE included |
+| `ainode_request_latency_milliseconds_count` | summary | Request count. Absent under the same rule |
 | `ainode_gpu_utilization_percent` | gauge | **Absent** on unified memory |
 | `ainode_gpu_memory_used_bytes` | gauge | **Absent** when nothing measured it |
 | `ainode_gpu_memory_total_bytes` | gauge | Total GPU memory |
 | `ainode_gpu_temperature_celsius` | gauge | GPU temperature. Real on a GB10 even though utilisation is not |
-| `ainode_model_loaded{model,status,port}` | gauge | Always 1, one series per engine on this node, so a fleet scrape can answer which box has which model |
+| `ainode_gpu_available` | gauge | `1` when NVML answered, `0` when the GPU block carries an error. Emitted **both ways**, as its help text always promised |
+| `ainode_model_loaded{model,status,port,tp}` | gauge | Always 1, one series per engine on this node, so a fleet scrape can answer which box has which model. `tp` is the instance's tensor-parallel width, absent when the record does not state one |
 | `ainode_metrics_retention_enabled` | gauge | Retention on or off |
 | `ainode_metrics_retention_degraded` | gauge | 1 after a store write failed |
 | `ainode_metrics_retention_db_bytes` | gauge | Size of `metrics.db` |
@@ -104,13 +103,28 @@ follows. On a DGX Spark (GB10) the driver exposes no GPU utilisation counter and
 NVML reports no per-device memory usage, so `ainode_gpu_utilization_percent` is
 simply not there. A 0 would draw as an idle GPU on a node that is serving.
 
-<Warning>
-The rule holds for the four GPU gauges and for
-`ainode_metrics_retention_oldest_sample_timestamp_seconds`. It does **not** hold
-for the latency summary: the three quantiles are emitted as `0.0` on a node that
-has timed no request, and `_sum` is always `0`. Treat a flat zero latency as "no
-traffic", not as "instant".
-</Warning>
+The rule holds for the four GPU gauges, for
+`ainode_metrics_retention_oldest_sample_timestamp_seconds` and, since 0.5.30, for
+the latency summary as well.
+
+<Note>
+**The latency summary changed in 0.5.30.** It used to publish three zero quantiles
+on a node that had timed no request, which reads as a node answering instantly, and
+a `_sum` that was always `0`, which makes `sum/count` read as zero latency
+everywhere. Now the whole summary is **absent** until a request has been timed, and
+`ainode_request_latency_milliseconds_sum` is **gone**: the collector keeps a window
+of latencies for the percentiles and no running total, so the only sum available was
+a literal 0. A summary with a fake sum is a wrong answer. Alert with `absent()`, not
+`== 0`, and do not average this summary.
+</Note>
+
+<Note>
+**`ainode_gpu_available` answers 1 as well now.** It only ever carried the `0`, so a
+healthy node published no series at all and a dashboard could not tell a working
+node from one that had never been scraped. The individual GPU readings keep the
+absent-when-unmeasured rule; this one is a yes or no about NVML itself and has an
+answer either way.
+</Note>
 
 Two consequences for anything built on the GPU series:
 

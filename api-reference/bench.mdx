@@ -42,8 +42,50 @@ curl -X POST http://localhost:3000/api/bench/runs \
   queue.
 - A busy node is a warning in the record, not a refusal.
 
-The harness, agentic, decide and embed benches are terminal subcommands of
+The harness, agentic, decide, embed and speech benches are terminal subcommands of
 `scripts/ainode-bench.py`, not browser runs.
+
+## The terminal bench against a protected node
+
+`scripts/ainode-bench.py` takes a key, which a node with
+[auth on](/security/api-keys) needs for both the `/v1` calls it times and the
+`/api` reads it uses to describe the node:
+
+```bash
+export AINODE_API_KEY=<key>
+python3 scripts/ainode-bench.py --url http://<node>:3000 --model <id> --label <label>
+
+# or per run
+python3 scripts/ainode-bench.py --api-key <key> ...
+```
+
+`--api-key` wins over `AINODE_API_KEY`. Every one of the six sections takes the
+flag. The run prints where the key came from and never the key itself:
+
+```
+key      : from $AINODE_API_KEY (never printed)
+```
+
+The key is never written into a record.
+
+**A refusal stops the section before it scores anything.** Each section makes one
+preflight request (a model list) before it measures, and a **401** or a **429** on
+it stops the run with exit code 2:
+
+```
+  REFUSED  this node wants an API key (pass --api-key or set AINODE_API_KEY)
+  nothing was scored and no record was written
+```
+
+A 429 says `this node is rate limiting the bench`, with the limiter's own message
+after it. The same refusal mid-run ends that section the same way, with no record
+written, so a half-measured run cannot be mistaken for a result. Ordinary engine
+errors (400, 404, 500, 503) are still one failed row rather than a stop.
+
+<Note>
+This is on `main` and is **not** in 0.5.30: it merged after the release tag. The
+version it ships in is the next release.
+</Note>
 
 <Warning>
 A 16-stream sweep contends with real traffic on the node it runs against. Do

@@ -16,23 +16,30 @@ One line per check with a verdict, and a `fix:` line wherever the answer is not
 OK.
 
 ```
-AINode doctor v0.5.29  Spark-3-DGX  Made in Texas
+AINode doctor v0.5.30  Spark-3-DGX  Made in Texas
 
 [ OK ] env.sudo                       not running under sudo
 [ OK ] config.engine_backend          nvidia backend, engine image scitrera/dgx-spark-vllm:0.17.0-t5 present locally
 [ OK ] config.gpu_memory_utilization  0.5
 [ OK ] config.discovery_port          5679
 [ OK ] docker.daemon                  docker 28.3.2 reachable
+[ OK ] gpu.devices                    1 GPU: NVIDIA GB10 (128 GB unified)
+[INFO] gpu.persistence                unified memory, where persistence mode does not apply
 [ OK ] disk.home                      521.4 GB free of 1858.2 GB (28%) on /root/.ainode
-[WARN] image.latest                   running 0.5.28, 0.5.29 is published
+[WARN] image.latest                   running 0.5.29, 0.5.30 is published
                                       fix: ainode update (and roll every node in the fleet, not just this one)
-[WARN] tls.enabled                    no TLS: the dashboard, the API and any key travel in clear text on 3000
-                                      fix: ainode tls enable (self-signed), or ainode tls enable --tailscale for a real certificate
+[ OK ] auth.state                     a key is required on /api and /v1 (2 key(s) on the node); peers authenticate with the key derived from cluster_secret
+[WARN] tls.enabled                    no TLS: the dashboard, the API and any key travel in clear text on 3000, and this node is spark-3.tailnet-name.ts.net on the tailnet
+                                      fix: ainode tls enable --tailscale (a real certificate for spark-3.tailnet-name.ts.net), or ainode tls enable for a self-signed one
 [INFO] ratelimit.state                no per-client limit on /v1, so one client can hold every engine busy
                                       fix: set rate_limit {"enabled": true, "max_inflight": 8} in config.json
 
-24 checks: 10 OK, 11 WARN, 2 FAIL, 1 INFO
+27 checks: 22 OK, 3 WARN, 0 FAIL, 2 INFO
 ```
+
+The count on the last line is **whatever this run actually produced**. It is not a
+fixed number: which checks run depends on whether this node has peers, whether it
+is in a container, and whether `--peer` was used.
 
 ## The verdicts
 
@@ -41,13 +48,11 @@ AINode doctor v0.5.29  Spark-3-DGX  Made in Texas
 | `OK` | Nothing to do |
 | `WARN` | Worth knowing, not fatal. A doctor that fails on every warning is a doctor nobody runs |
 | `FAIL` | This node cannot do its job. Exits non-zero |
-| `INFO` | A fact about the node, not a judgement. Currently the rate-limit state |
+| `INFO` | A fact about the node, or a question that cannot be answered from where the command is running. Never affects the exit code |
 
 ## What it checks
 
-**24 checks** always, **25** once the node can see a peer, and up to **27** when a
-peer announces no fabric IP or does not answer. They run in the order a human reads
-them.
+They run in the order a human reads them.
 
 ### Config
 
@@ -67,8 +72,15 @@ them.
 |---|---|
 | `docker.daemon` | Docker reachable, with its version |
 | `gpu.devices` | GPUs enumerated, with their count and whether the memory is unified |
+| `gpu.persistence` | Persistence mode on a node with **discrete** GPUs. Off is a WARN, because every process that opens a GPU then pays a full initialisation, which is how a node with no engine loaded can stop answering its own API. Unified memory and a node with no NVIDIA device are INFO, because the question does not apply |
 | `disk.home` | Free space on the AINode home. A missing directory is a WARN that `--fix` creates; under **15 percent** free is a WARN |
 | `disk.models` | The same, for the models dir |
+
+`gpu.persistence` names the fix exactly:
+
+```bash
+sudo nvidia-smi -pm 1    # add nvidia-persistenced to boot to keep it across a reboot
+```
 
 ### Image and service
 
@@ -76,7 +88,7 @@ them.
 |---|---|
 | `image.pin` | The `AINODE_IMAGE` in `image.env`, which is what the systemd unit actually reads, against the running container. A pin that disagrees with what is running is a WARN: a restart would change the version under you |
 | `image.latest` | The running release against the newest published tag |
-| `service.unit` | The systemd unit is installed and active. Installed but not active is a **FAIL**. Run inside the AINode container, where there is no systemd to ask, it is a WARN saying so |
+| `service.unit` | The systemd unit is installed and active. Installed but not active is a **FAIL** |
 
 ### Ports
 
@@ -102,9 +114,37 @@ them.
 | Check | What it verifies |
 |---|---|
 | `secrets.store` | The secrets store's file mode |
-| `tls.enabled` | Whether HTTPS is served, and the certificate's expiry. See [TLS](/security/tls) |
+| `auth.state` | Whether this node's API is protected, and whether its own cluster can still reach it. **FAIL** on auth plus peers with no `cluster_secret`, **WARN** on no key required and a non-loopback bind. See [API keys](/security/api-keys) |
+| `cluster.secret` | Whether a `cluster_secret` is set at all. A WARN when there is none, because discovery is then unauthenticated and no peer can authenticate either |
+| `tls.enabled` | Whether HTTPS is served, and the certificate's expiry. The fix line names **this node's** tailnet name. See [TLS](/security/tls) |
 | `ratelimit.state` | The per-client limits, as INFO. See [Rate limits](/security/rate-limits) |
 | `credentials.hf_token` | Whether a Hugging Face token exists anywhere: `config.json`, `$HF_TOKEN` / `$HUGGING_FACE_HUB_TOKEN` / `$HUGGINGFACE_TOKEN`, or the secrets store. **Presence only, never a value.** None is a WARN, because a gated repo answers 401 at download time |
+
+## Run inside the container, which is the documented deployment
+
+Four of those checks are about the **host**, and the CLI runs in a container. They
+used to carry a WARN or a FAIL nobody in that container could clear. They are
+**INFO** now, each naming the host command that answers the question:
+
+| Check | What it says in a container |
+|---|---|
+| `service.unit` | *running inside the AINode container, where there is no systemd to ask*, with `systemctl status ainode.service` as the fix |
+| `docker.daemon` | *docker does not answer inside this container, so neither the host's daemon nor this node's engine launches can be judged from here*, pointing at `docker info` on the host and at the missing `-v /var/run/docker.sock:/var/run/docker.sock` |
+| `image.pin` | *which image this container runs cannot be read without a docker to ask*, pointing at `docker ps --filter name=ainode` |
+| `config.engine_backend` | *docker is not answering here, so whether it is pulled is unknown*, pointing at `docker image inspect <image>` |
+
+**And the host wrapper hands the real answer in for the one that matters.** The
+`ainode doctor` wrapper reads `systemctl is-active` on the host and passes it to
+the container, so `service.unit` is a real answer rather than a shrug:
+
+| Host state | Verdict |
+|---|---|
+| `active` | **OK**: *ainode.service active on the host (state from the host wrapper)* |
+| `activating`, `reloading`, `deactivating` | **INFO**: it is mid restart |
+| `inactive`, `failed` | **WARN**: the service is that state *while this container is running, so a reboot will not bring the node back*, with `sudo systemctl enable --now ainode.service` as the fix |
+
+The container is detected from `AINODE_IN_CONTAINER=1`, then `/.dockerenv`, then
+pid 1's cgroup.
 
 ## Exit codes
 
@@ -112,6 +152,7 @@ them.
 |---|---|
 | `0` | No FAIL. WARN and INFO do not fail the run |
 | `1` | Any FAIL |
+| `2` | `--fix` was combined with `--peer` |
 
 So it can gate a script:
 
@@ -128,11 +169,11 @@ ainode doctor --json
 ```json
 {
   "doctor": 1,
-  "version": "0.5.29",
+  "version": "0.5.30",
   "node_id": "25033c02",
   "node_name": "Spark-2-DGX",
   "generated_at": "2026-09-20T14:02:11Z",
-  "summary": {"ok": 10, "warn": 11, "fail": 2, "total": 24, "info": 1},
+  "summary": {"ok": 22, "warn": 3, "fail": 0, "total": 27, "info": 2},
   "checks": [
     {"name": "env.sudo", "status": "ok", "detail": "not running under sudo", "fix": "", "data": {}}
   ]
@@ -140,7 +181,8 @@ ainode doctor --json
 ```
 
 Statuses are **lowercase** in JSON (`ok`, `warn`, `fail`, `info`); the human form
-prints them as `[ OK ]`, `[WARN]`, `[FAIL]` and `[INFO]`.
+prints them as `[ OK ]`, `[WARN]`, `[FAIL]` and `[INFO]`. `info` appears in
+`summary` only when at least one check produced one.
 
 Each check carries `name`, `status`, `detail`, `fix` and a `data` block with the
 numbers behind the sentence. With `--fix`, the payload also carries
@@ -173,6 +215,9 @@ exception or a silent empty report. A peer running a release whose doctor is sti
 the old stub gets its own failed check (`peer.version`) saying so, which is the
 common answer mid-rollout.
 
+The peer probes carry the cluster's [fleet key](/security/api-keys), so a peer that
+requires an API key still answers them.
+
 ## `--fix`
 
 ```bash
@@ -193,3 +238,13 @@ everything still left for a human.
 
 Anything that pulls an image, restarts a service or edits a systemd unit is
 listed, never done.
+
+<Warning>
+**`--fix` and `--peer` together are refused**, with exit code 2, before any SSH
+happens. A repair has to be run where it applies, so the command names it:
+
+```
+--fix is not applied over --peer. Run it on <peer>:
+  ssh <peer> docker exec ainode ainode doctor --fix
+```
+</Warning>

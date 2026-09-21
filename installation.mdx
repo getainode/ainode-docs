@@ -28,6 +28,11 @@ model launch, or `AINODE_NVIDIA_IMAGE=<image>` to pre-pull a different one.
 curl -fsSL https://ainode.dev/install | bash
 ```
 
+**A fresh install requires an API key.** The installer mints one, stores only its
+SHA-256, and prints it once at the end. `AINODE_AUTH=off` installs an open node
+instead, and an install over an existing `config.json` leaves the auth state and the
+keys exactly as they are. See [API keys](/security/api-keys).
+
 ## Multi-node cluster
 
 ```bash
@@ -99,7 +104,9 @@ manually, pin a numeric tag too. The current tags are on the
 |---|---|
 | `/etc/systemd/system/ainode.service` | Systemd unit, auto-starts on boot; carries `Environment=AINODE_HOME=<install user's ~/.ainode>` |
 | `/usr/local/bin/ainode` | Host wrapper CLI (`ainode update` runs on the host; other commands are forwarded to the container) |
-| `~/.ainode/config.json` | Node configuration |
+| `~/.ainode/config.json` | Node configuration, mode 0600 (it carries `cluster_secret` and may carry `hf_token`) |
+| `~/.ainode/auth.json` | API key hashes and whether a key is required, mode 0600. Written on a fresh install |
+| `/etc/systemd/system/ainode-tls-renew.{service,timer}` | Daily check that renews a tailnet TLS certificate inside its last 14 days. Installed whatever this node's TLS state is; see [TLS](/security/tls) |
 | `~/.ainode/image.env` | Pinned container image tag (`EnvironmentFile` the unit reads; rewritten by `ainode update`) |
 | `~/.ainode/models/` | Downloaded model weights |
 | `~/.ainode/datasets/` | Training / AutoData datasets |
