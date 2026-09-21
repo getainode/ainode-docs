@@ -1,16 +1,17 @@
 ---
 title: "Metrics"
-description: "Prometheus and JSON metrics endpoints."
+description: "Prometheus exposition, the JSON snapshots, and the retained history route."
 ---
 
 ## Endpoints
 
 | URL | Format | Description |
 |---|---|---|
-| `GET http://localhost:3000/metrics` | Prometheus text | Scrape target for Prometheus / Grafana (`ainode_*`) |
+| `GET http://localhost:3000/metrics` | Prometheus text | Scrape target for Prometheus / Grafana / VictoriaMetrics (`ainode_*`) |
 | `GET http://localhost:3000/api/metrics` | JSON | Full snapshot |
-| `GET http://localhost:3000/api/metrics/gpu` | JSON | GPU stats only |
+| `GET http://localhost:3000/api/metrics/gpu` | JSON | GPU stats only, including the per-device list |
 | `GET http://localhost:3000/api/metrics/requests` | JSON | Request stats with latency percentiles |
+| `GET http://localhost:3000/api/metrics/history` | JSON | Any series over any window, from `<AINODE_HOME>/metrics.db`. See [Metrics retention](/ops/metrics-retention) |
 
 <Note>
 AINode's Prometheus exposition, every `ainode_*` metric, is served by the
@@ -19,49 +20,140 @@ engine container's native metrics (`vllm:*` names), a different metric set.
 Scrape `8000` only if you specifically want vLLM's native metrics.
 </Note>
 
-## Prometheus scrape config
+<Warning>
+`GET /metrics` answered **500 on every request** from 0.4 until 0.5.29. The
+handler built a response with both a `Content-Type` header and aiohttp's
+`content_type` argument, which aiohttp refuses. If you tried to scrape an older
+node and got nothing, that is why. It answers now.
+</Warning>
+
+## Authentication
+
+`/metrics` is **not** on the list of paths that answer without a key: it reports
+what the node is doing and which models it holds. With
+[API key auth](/security/api-keys) on, point your scraper at a credentials file:
 
 ```yaml
-scrape_configs:
-  - job_name: ainode
-    static_configs:
-      - targets: ["<node-ip>:3000"]
+authorization:
+  type: Bearer
+  credentials_file: /etc/prometheus/ainode.key
 ```
 
-## Key metrics
+## Scrape config
+
+The product repo ships a working one at
+[`docs/prometheus-scrape.yml`](https://github.com/getainode/ainode/blob/main/docs/prometheus-scrape.yml).
+Drop it in as `prometheus.yml`, or paste its `scrape_configs` block into an
+existing one:
+
+```bash
+prometheus --config.file=docs/prometheus-scrape.yml
+```
+
+It carries a `scrape_interval` of 15s matching AINode's own
+`metrics.interval_seconds`, relabelling that makes `instance` read `Spark-3`
+instead of an address, a commented-out `authorization` block for a keyed node, and
+a commented set of recording and alerting rules. Tested against Prometheus 2.x and
+VictoriaMetrics; the format is `text/plain; version=0.0.4`, which every
+Prometheus-compatible scraper reads.
+
+**Replace its `static_configs` targets with your own node addresses.** The file
+ships with the addresses of the fleet it was written against.
+
+## Identity labels
+
+**Every series carries `node` and `node_id`**, from the node's own config. Without
+them a fleet scraped into one Prometheus produces four
+`ainode_gpu_temperature_celsius` series told apart only by the scraper's own
+`instance` label, which is an address and not a machine.
+
+Prefer `node_id` over `instance`: an address changes when a node moves, a
+`node_id` does not.
+
+## Metrics
 
 | Metric | Type | Description |
 |---|---|---|
-| `ainode_uptime_seconds` | counter | Seconds since process start |
+| `ainode_uptime_seconds` | counter | Seconds since process start. Resets on restart |
 | `ainode_requests_total` | counter | Total inference requests |
 | `ainode_request_errors_total` | counter | Failed requests |
 | `ainode_tokens_generated_total` | counter | Total tokens generated |
-| `ainode_tokens_per_second` | gauge | Average throughput |
-| `ainode_request_latency_milliseconds{quantile}` | summary | P50/P95/P99 latency |
+| `ainode_tokens_per_second` | gauge | Mean over process life |
 | `ainode_requests_by_model_total{model}` | counter | Per-model request counts |
-| `ainode_gpu_available` | gauge | 1/0, whether the GPU is queryable via pynvml |
-| `ainode_gpu_utilization_percent` | gauge | GPU utilization 0 to 100 |
-| `ainode_gpu_memory_used_bytes` | gauge | GPU memory in use |
+| `ainode_request_latency_milliseconds{quantile}` | summary | P50 / P95 / P99, pre-computed by the collector. Always emitted, as `0.0` when no request has been timed |
+| `ainode_request_latency_milliseconds_count` | summary | Request count |
+| `ainode_request_latency_milliseconds_sum` | summary | **Always `0`**: the exact sum is not tracked. It exists so a recording rule can be written, not so `sum/count` means anything |
+| `ainode_gpu_available` | gauge | **Only ever emitted as `0`**, and only when the GPU block carries an error, so Grafana shows a value rather than "No data" when the GPU is unreachable. There is no `1` line on a healthy node: the four GPU gauges above being present is what says the GPU answered |
+| `ainode_gpu_utilization_percent` | gauge | **Absent** on unified memory |
+| `ainode_gpu_memory_used_bytes` | gauge | **Absent** when nothing measured it |
 | `ainode_gpu_memory_total_bytes` | gauge | Total GPU memory |
-| `ainode_gpu_temperature_celsius` | gauge | GPU temperature |
-| `ainode_build_info{version}` | gauge | Always 1; carries version label |
+| `ainode_gpu_temperature_celsius` | gauge | GPU temperature. Real on a GB10 even though utilisation is not |
+| `ainode_model_loaded{model,status,port}` | gauge | Always 1, one series per engine on this node, so a fleet scrape can answer which box has which model |
+| `ainode_metrics_retention_enabled` | gauge | Retention on or off |
+| `ainode_metrics_retention_degraded` | gauge | 1 after a store write failed |
+| `ainode_metrics_retention_db_bytes` | gauge | Size of `metrics.db` |
+| `ainode_metrics_retention_samples` | gauge | Raw rows held |
+| `ainode_metrics_retention_downsampled_samples` | gauge | Roll-up rows held |
+| `ainode_metrics_retention_oldest_sample_timestamp_seconds` | gauge | **Absent** when the store is empty |
+| `ainode_build_info{version}` | gauge | Always 1; carries the version label |
 
-## Recommended alerts
+## A GPU figure nobody measured is absent, never 0
+
+That is deliberate, and it is the same rule the rest of AINode's telemetry
+follows. On a DGX Spark (GB10) the driver exposes no GPU utilisation counter and
+NVML reports no per-device memory usage, so `ainode_gpu_utilization_percent` is
+simply not there. A 0 would draw as an idle GPU on a node that is serving.
+
+<Warning>
+The rule holds for the four GPU gauges and for
+`ainode_metrics_retention_oldest_sample_timestamp_seconds`. It does **not** hold
+for the latency summary: the three quantiles are emitted as `0.0` on a node that
+has timed no request, and `_sum` is always `0`. Treat a flat zero latency as "no
+traffic", not as "instant".
+</Warning>
+
+Two consequences for anything built on the GPU series:
+
+- **Alert on `absent()`, not on `== 0`.** `absent(ainode_gpu_utilization_percent)`
+  is true on every Spark in the fleet, forever, and that is correct.
+- **A Grafana panel wants "Connect null values: never".** Joining across a gap
+  invents the reading that was missing.
+
+## Alerts worth having
 
 ```yaml
-# GPU memory > 95%
-- alert: AINodeGPUMemoryHigh
-  expr: ainode_gpu_memory_used_bytes / ainode_gpu_memory_total_bytes > 0.95
+# Retention stopped writing. The node keeps serving, so nothing else tells you
+# the history is no longer being kept.
+- alert: AINodeMetricsRetentionDegraded
+  expr: ainode_metrics_retention_degraded == 1
+  for: 10m
 
-# Error rate > 5/min
-- alert: AINodeErrorRate
-  expr: rate(ainode_request_errors_total[1m]) > 5
+# A node restarted. ainode_uptime_seconds is a counter that resets, so resets()
+# counts restarts over the window.
+- alert: AINodeRestarting
+  expr: resets(ainode_uptime_seconds[1h]) > 2
+  for: 5m
 
-# Temperature > 85°C
-- alert: AINodeGPUTemp
+# Errors as a share of traffic, rather than an absolute count that grows forever
+# and alerts on a node that has been healthy for a month.
+- record: ainode:request_error_ratio5m
+  expr: >
+    rate(ainode_request_errors_total[5m])
+      / clamp_min(rate(ainode_requests_total[5m]), 0.001)
+
+# Temperature is real on a GB10 even though utilisation is not, so this one works
+# on every node in the fleet.
+- alert: AINodeGPUHot
   expr: ainode_gpu_temperature_celsius > 85
+  for: 10m
 
 # Node down (matches the job_name: ainode scrape above)
 - alert: AINodeDown
   expr: up{job="ainode"} == 0
 ```
+
+<Warning>
+Do not alert on `ainode_gpu_memory_used_bytes / ainode_gpu_memory_total_bytes` on
+a unified-memory node. The used figure is absent there, because host RAM is not
+VRAM. See [Metrics retention](/ops/metrics-retention) for the null rule.
+</Warning>

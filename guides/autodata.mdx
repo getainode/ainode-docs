@@ -29,10 +29,12 @@ at a small one). It stays a synthetic-data utility: the only live product surfac
 dashboard panel and `POST /api/training/autodata`.
 
 <Note>
-AutoData writes ShareGPT rows (`{"conversations": [...]}`). The training runner
-tokenizes `text`, `instruction`/`output` and `prompt`/`completion` rows, not that
-shape, so convert a kept set before training on it. See
-[Fine-Tuning](/guides/training).
+AutoData writes ShareGPT rows (`{"conversations": [...]}`), and as of 0.5.28 the
+training runner reads them directly: no conversion step. A `conversations` or
+`messages` column is rendered through the tokenizer's chat template, with ShareGPT
+`from`/`value` and OpenAI `role`/`content` both mapped onto chat roles. The whole
+rendered conversation is supervised; assistant-only masking is not implemented. See
+[Fine-Tuning](/guides/training#1-add-a-dataset).
 </Note>
 
 ## Config

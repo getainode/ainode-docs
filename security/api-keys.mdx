@@ -1,0 +1,203 @@
+---
+title: "API keys"
+description: "Require a key on /api and /v1, from the dashboard or the CLI, without locking yourself out of your own node."
+icon: "key"
+---
+
+API key auth is **off by default**, which is what a private network wants and
+what the fleet runs. A node with no key set answers every request on port 3000,
+and the dashboard header says so in as many words: **API open, no key set**.
+
+<Warning>
+An unauthenticated port 3000 is a port that can load models, launch training
+jobs, patch config and read the node's logs. Do not expose one to the internet.
+</Warning>
+
+## Turn it on from the dashboard
+
+**Config, API access** is the whole story in one panel: whether this port wants
+a key, the switch that turns it on, the key shown once when it is minted, the
+keys that exist with a **Revoke** on each, and a box to paste a key into on a
+fresh browser.
+
+The browser that flips the switch stores the new key itself, so the click that
+enables auth cannot lock the operator out. That is the bug this replaced: every
+request the UI made used to travel with no `Authorization` header at all, so
+`ainode auth enable` left the shell rendering and every panel behind it 401ing,
+and the only way back was `ainode auth disable` on the box.
+
+Every request from `app.js`, `bench.js` and the dashboard's own pages now goes
+through one wrapper (`web/static/js/auth.js`) that attaches the key when one is
+stored, keeps it in `localStorage` under `ainode.apiKey`, and reports a 401
+exactly once per poll cycle to the one handler that opens the panel.
+
+The header chip reads its state from `GET /api/auth/status` and is one click from
+the panel that changes it.
+
+## Turn it on from the CLI
+
+```bash
+ainode auth enable      # turn it on, minting a first key if there is none
+ainode auth status      # is it on, and how many keys exist
+ainode auth new-key     # mint another key
+ainode auth disable     # turn it off; all requests allowed again
+```
+
+`ainode auth enable` prints the key and its id **only for a key it just
+minted**. On a node that already has one it says so instead:
+
+```
+Using the 1 key(s) this node already has (stored hashed, so not shown again).
+Lost it? ainode auth new-key
+```
+
+There is no `ainode auth list` and no `ainode auth revoke`. Listing and revoking
+are the dashboard panel and HTTP only.
+
+<Warning>
+**The CLI subcommands need a restart to take effect.** The server reads
+`auth.json` once when the app is built and nothing re-reads it, so
+`ainode auth enable`, `ainode auth disable` and `ainode auth new-key` change the
+file but not the running node until:
+
+```bash
+sudo systemctl restart ainode
+```
+
+The dashboard panel and the `/api/auth/*` routes mutate the live object, so they
+take effect immediately. Prefer the dashboard on a node that is serving.
+</Warning>
+
+## Keys are shown once
+
+`<AINODE_HOME>/auth.json` stores, per key, an `id` and a **SHA-256 hash** of the
+key:
+
+```json
+{"enabled": true, "api_keys": [{"id": "1a2b3c4d", "key_hash": "<sha256 hex>"}]}
+```
+
+The plaintext is never written anywhere, so a key that has been minted cannot be
+shown again: mint a new one instead. A key is 32 hex characters; its id is 8.
+
+Validation is a constant-time compare against every stored hash, and the id of
+the key that matched is stamped on the request, which is how the
+[rate limiter](/security/rate-limits) gives each key its own budget.
+
+## Using a key
+
+```bash
+curl http://<node>:3000/v1/chat/completions \
+  -H "Authorization: Bearer <key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "...", "messages": [{"role": "user", "content": "hi"}]}'
+```
+
+A request with no key gets a **401** that tells the caller what to do:
+
+```json
+{
+  "error": {
+    "message": "This node requires an API key. Send Authorization: Bearer <key>, or paste the key into the dashboard under Config > API access.",
+    "type": "auth_error"
+  }
+}
+```
+
+A wrong key gets a 401 with `Invalid API key`.
+
+## The rule, and the paths that stay open
+
+**With auth enabled, every path under `/api` and `/v1` needs the key.** There are
+five exceptions and the static shell, each with a reason:
+
+| Path | Why it stays open |
+|---|---|
+| `/` and `/static/*` | The shell is files. Without it the browser cannot render the page that asks for a key |
+| `GET /api/health` | A liveness probe has no key |
+| `GET /api/auth/status` | So the UI can say "this node wants a key" instead of rendering an empty page |
+| `GET /api/cluster/endpoint` | Node names, addresses and ports, nothing else. A client whose configured node is down has to be able to ask a reachable one where the rest of the fleet is, and the key it holds does not help it find an address. No model, no telemetry, no config, no key material |
+| `POST /api/cluster/join` | A node joining this cluster does not hold this cluster's key yet, so a single-use expiring [join token](/cluster/joining) is the credential instead. The route is rate limited to five attempts a minute per source address in place of a key |
+
+Matching is on the path only, for every method. `GET /api/status` is **not**
+exempt, and neither is `/metrics`.
+
+That one rule covers every mutating route rather than a list that can drift, and
+`tests/test_auth_gate.py` walks the real route table and fails on any route
+reachable without a key that is not one of those.
+
+<Note>
+The browser onboarding wizard used to be a sixth exemption, open while
+`config.onboarded` was false. It was removed in 0.5.29: it was unreachable on
+every deployed node, because the installer and every non-TTY start set
+`onboarded` before the server came up, and it never joined a cluster even when
+reached.
+</Note>
+
+## `trust_remote_code` needs a key even when auth is off
+
+`trust_remote_code` makes the engine execute Python out of the model repository,
+inside a container that mounts the host Hugging Face cache and the host SSH
+directory. Setting it to true therefore requires a request that **presents an API
+key**, and that is true whether or not auth is enabled: a node running open can
+still have a key, and presenting it is what separates the operator from anyone
+else who can reach the port.
+
+Three paths, three answers:
+
+| Path | Behaviour |
+|---|---|
+| `PATCH /api/config {"trust_remote_code": true}` without a key | Answers 200 with the field in `rejected` and the rule in `rejected_reasons`. Nothing is applied |
+| A per-load override (`POST /api/models/load`, `POST /api/sharding/launch`) without a key | **400**, with the rule and "`<model>` is not a curated entry that declares it" |
+| A curated catalog entry whose recipe already declares it | Applies per load, with no key. That is how the models that genuinely need it stay one click. Five entries declare it: Spark-X2.5 4B, Qwen3.6 35B-A3B (V100), DeepSeek V4 Flash, and both Qwen3.8-Flash-Next lanes |
+
+**Clearing it is always allowed.** Turning the field off is a de-escalation, so a
+client can always put the node back.
+
+The rule it prints, verbatim:
+
+> trust_remote_code makes the engine execute Python from the model repository
+> inside the engine container, so it can only be set by a request that presents an
+> API key (dashboard: Config > API access, or Authorization: Bearer &lt;key&gt;), or
+> by loading a curated catalog model whose recipe already declares it.
+
+## What reports the state
+
+`GET /api/auth/status` (always open) and an `auth` block on `GET /api/status`
+carry `enabled`, `key_count` and a `label`, which is one of exactly three
+sentences:
+
+| `label` | When |
+|---|---|
+| `API key required` | Auth enabled |
+| `API open, key set but not required` | Auth off, at least one key exists |
+| `API open, no key set` | Auth off, no keys |
+
+The dashboard header chip, the installer's summary line and `ainode auth status`
+all print those same words, from one place in the code, so they cannot end up
+saying three different things.
+
+## HTTP routes
+
+| Method | Path | Answers |
+|---|---|---|
+| GET | `/api/auth/status` | `{enabled, key_count, authenticated}`. Never a key or a hash. Answers without a key |
+| POST | `/api/auth/enable` | `{enabled: true, key_id, api_key, key_count}`. `api_key` is `null` (with a `message`) when the node already had a key |
+| POST | `/api/auth/disable` | `{enabled: false, key_count}` |
+| GET | `/api/auth/keys` | `{enabled, key_count, keys: [{id}]}` |
+| POST | `/api/auth/keys` | `{api_key, key_id, key_count}`. The value comes back once |
+| DELETE | `/api/auth/keys/{key_id}` | `{revoked: true, key_id, key_count}`. An unknown id is a **404** with `Key '<id>' not found` |
+
+## The bench view, and why downloads still work
+
+Two things a header cannot travel on are the bench report iframe and its JSON
+download links. Both are fetched through the auth wrapper and handed to the
+browser as a blob rather than an `href`, so the bench view keeps working with
+auth on.
+
+## Known gap: the desktop app
+
+[AINode Desktop](/desktop) has no field for an API key and has never sent one, so
+a node with auth enabled cannot be polled by it at all. `/api/cluster/endpoint`
+needs no key, so the app can still learn the fleet's addresses from such a node,
+but `/api/status` answers 401. See [Desktop app](/desktop).

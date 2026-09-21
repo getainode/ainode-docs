@@ -1,0 +1,85 @@
+---
+title: "Audio"
+description: "Speech to text through the fleet endpoint: /v1/audio/transcriptions and /v1/audio/translations, routed like a chat completion."
+---
+
+Speech to text is a fleet feature. `POST /v1/audio/transcriptions` and
+`POST /v1/audio/translations` route across the cluster exactly like a chat
+completion: the model id in the request picks the node, a dead candidate fails
+over, and headers, the query string and the response status pass through.
+
+## Transcribe
+
+```bash
+curl http://<node>:3000/v1/audio/transcriptions \
+  -F model=openai/whisper-large-v3-turbo \
+  -F file=@meeting.wav
+```
+
+`/v1/audio/translations` is the same shape and translates into English.
+
+## Multipart, not JSON
+
+These are the **one pair of forwarded paths whose body is not JSON**. OpenAI's
+audio API is a multipart file upload, and the model id rides beside the file as a
+form field.
+
+The proxy reads the `model` form field out of the body it buffered, and forwards
+the **identical bytes** under the caller's own `Content-Type` and boundary. It
+does not re-encode the upload.
+
+## A body that names no model is a 400
+
+There is no JSON body to fall back on, so an unnamed model cannot be answered by
+routing to this node's own model the way a JSON body with no `model` is: that
+would send someone's audio to a chat engine and return its refusal as if the
+fleet had nothing to serve.
+
+```json
+{
+  "error": {
+    "message": "this path takes multipart/form-data and the 'model' form field names the model to route to: add -F model=<model id> (GET /v1/models lists what the fleet is serving)",
+    "type": "invalid_request_error",
+    "param": "model",
+    "code": "missing_model_field"
+  }
+}
+```
+
+## You need a speech model loaded
+
+`GET /v1/models` lists what the fleet is serving. The curated catalog carries
+`openai/whisper-large-v3-turbo` with the launch recipe and the engine image it
+needs; see [Models catalog](/guides/models).
+
+<Note>
+vLLM attaches its speech-to-text router **only when the served model reports the
+transcription task**, so a chat or pooling engine's `/openapi.json` does not list
+these two paths at all. Verified on Spark-4: absent on Nemotron at `:8000` and on
+the pooling engine at `:8001`. The paths above are the ones that router declares
+in the engine image the Whisper catalog entry pins (vLLM 0.17.1).
+</Note>
+
+## What comes back
+
+Whatever the engine returns, with the response status and `Content-Type` passed
+through, plus `X-AINode-Served-By: host:port` naming the instance that answered.
+See [Target pinning](/api-reference/overview#pinning-a-request-to-one-instance).
+
+## Why an engine needs a special image
+
+No stock image on the fleet has `librosa` or `soundfile`, and vLLM imports
+`soundfile` as soon as the model reports the transcription task, so a Whisper
+serve on the stock image dies before it binds a port. The catalog entry pins
+`ghcr.io/getainode/ainode-whisper:0.17.0-t5`, which carries vLLM's audio extras.
+See [Models catalog](/guides/models#speech).
+
+## A speech instance is its own kind
+
+Across the interface, a speech instance behaves like an embedding instance:
+
+- It stays **out of the chat and bench pickers**.
+- The capability probe reports `speech` off the catalog rather than asking a chat
+  question of an engine with no chat path.
+- The model card, the capability badges, the endpoint list and the Server view's
+  copy-curl button all know what it serves.

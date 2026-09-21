@@ -1,0 +1,149 @@
+---
+title: "Desktop app"
+description: "AINode Desktop: one saved address, the fleet in the menu bar, and failover when the node you configured stops answering."
+icon: "display"
+---
+
+AINode Desktop is a small native app for macOS and Windows that wraps the AINode
+web UI. You tell it where your master AINode lives, and from then on the dashboard
+opens as its own app instead of a browser tab. It also puts your fleet in the menu
+bar and tells you when a model finishes loading.
+
+It is a thin shell, not a rewrite. The window shows the same web UI your master
+already serves. The app adds the parts a browser cannot: one saved address, a menu
+bar item, native notifications, and a page that waits for the master when it is
+down.
+
+- Repo: [getainode/ainode-desktop](https://github.com/getainode/ainode-desktop)
+- Built with Tauri (Rust plus plain HTML, CSS and JS)
+
+## Install
+
+From the [releases page](https://github.com/getainode/ainode-desktop/releases).
+The current release is **v0.1.1**, a signed and notarized macOS universal build:
+
+| Asset | What it is |
+|---|---|
+| `AINode_0.1.1_universal.dmg` | The macOS installer |
+| `AINode_0.1.1_universal.app.zip` | The app bundle |
+| `AINode_0.1.1_universal.sha256` | Checksum |
+
+Windows installers (NSIS and MSI) are built by the repo's own workflow and signed
+with Azure Trusted Signing, but **no release carries them yet**: v0.1.1 is macOS
+only.
+
+To build from source you need Rust 1.85 or newer, Node 20 or newer, and the Xcode
+Command Line Tools:
+
+```bash
+npm install
+npm run tauri build
+```
+
+A source build is unsigned. To open it on another Mac, right-click the app and
+choose Open the first time, or clear the quarantine flag:
+
+```bash
+xattr -dr com.apple.quarantine AINode.app
+```
+
+## The one setting
+
+**Where is your master AINode?** Two fields sit behind that question:
+
+| Field | Example |
+|---|---|
+| **Primary address** | `192.168.0.10:3000` |
+| **Alternate address** (optional) | A second way to reach the same node, such as its tailnet address `100.122.26.9:3000` |
+
+Each field has a **Test** button that calls `/api/status` and shows the node name
+and AINode version that answered. On launch the app probes both addresses at once
+with a 2 second timeout, uses whichever answers, and remembers which one worked so
+the next launch tries it first. The first launch with nothing saved opens this
+screen.
+
+Settings live in the app data folder:
+`~/Library/Application Support/ai.ainode.desktop/settings.json` on macOS,
+`%APPDATA%\ai.ainode.desktop\settings.json` on Windows.
+
+## Failover
+
+There is no third field, and there does not need to be. Every AINode routes every
+model the fleet serves, so any node can answer for the cluster.
+
+On every successful poll the app saves the fleet's own list of addresses, which
+rides along on `/api/status` as `endpoint_hint`. A node that answers status without
+one is asked [`GET /api/cluster/endpoint`](/cluster/endpoint) once, and never again
+that session if it 404s, which is what a node older than the list does. Loopback and
+placeholder rows are dropped on the way in: the list comes off the network, and the
+cost of trusting it would be an app that spends an outage dialling itself.
+
+- **Steady state costs nothing extra.** Only the configured pair is probed, the same
+  two requests the app has always made.
+- **Only when neither answers** does it fan out to the saved nodes, **master
+  first**, and stay on whichever one answers.
+- **It comes home.** The primary wins the pick whenever it answers, so the app
+  returns to the address you chose as soon as it is back rather than living on a
+  fallback until the next restart. A working fallback is kept while the primary is
+  still down, so two live nodes do not make the app flap.
+- **It says who is serving.** *Connected through Spark-2* in the menu bar title, in
+  the tray menu and on the Settings screen. The name is the node's own word from
+  `/api/status`, not the cached list's, and the line is absent while the app is on
+  the primary, because then there is nothing to explain.
+
+The fleet list is a cache in the same settings file under `known`. Nobody types it,
+and saving a different address clears it: the old fleet may still be answering, and
+must not quietly serve the app after you have pointed it somewhere else.
+
+A node that reports no list leaves the behaviour exactly as it was: the two
+addresses and nothing else. That is every node before AINode 0.5.29.
+
+<Note>
+Failover is merged on the app's `main` but is **not in a tagged release yet**:
+v0.1.1 predates it. Build from source to try it, or wait for the next release.
+</Note>
+
+## What you get
+
+- **Main window**: the AINode web UI at `http://<master>/`. If that node is
+  unreachable the window follows whichever node still answers, and only when nothing
+  in the fleet answers at all does a bundled "Waiting for ..." page take over and
+  retry every 5 seconds. If the master restarts mid-session the app notices within
+  about 15 seconds, shows the waiting page, and goes back to the UI when the master
+  answers again. Closing the window hides it; the app keeps running in the menu bar.
+  Cmd+Q quits.
+- **Menu bar item**: polls `/api/nodes` every 10 seconds and shows a title like
+  `AINode · 6 nodes · 5 models`. The menu lists every node as
+  `name · model or load progress · online/offline`, then Settings, Refresh, About
+  and Quit.
+- **Notifications**: a node going from loading to ready gives you
+  `Model is ready on Node (loaded in N min)`. A node going offline or coming back
+  gives you one notification each way. Nothing fires on the first poll after launch.
+
+On Windows the menu bar is File, View, Help; the fleet lives in the system tray
+(colour icon, double click opens the app); closing the window hides it to the tray.
+
+## It only ever reads
+
+The app makes three requests of its own: `GET /api/status`, `GET /api/nodes`, and
+`GET /api/cluster/endpoint` when a node's status carries no `endpoint_hint`.
+Everything you do inside the web UI goes through the UI itself, exactly as it would
+in a browser.
+
+## Known gaps
+
+<Warning>
+**A node with an API key cannot be polled at all.** `/api/status` answers 401
+without a key and this app has never sent one, and there is no field to put one in.
+`/api/cluster/endpoint` needs no key by design, so the app can still learn the
+fleet's addresses from such a node, but it cannot read status. See
+[API keys](/security/api-keys).
+</Warning>
+
+<Warning>
+**No HTTPS support beyond what the system trusts.** The app points a webview at
+`http://<master>/`. A node serving [TLS](/security/tls) on 3443 with a self-signed
+certificate is not something a Mac client with App Transport Security will accept;
+`ainode tls enable --tailscale` produces the real certificate that case needs. There
+is no setting in the app for choosing the HTTPS port.
+</Warning>

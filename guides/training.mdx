@@ -12,10 +12,17 @@ icon: "brain"
 | **QLoRA** | Lowest: 4-bit NF4 base + adapters | Large models on memory-constrained nodes |
 | **Full** | High: all weights updated | Best quality, needs the whole model plus optimizer state in one node's memory |
 
-Every run is **single node, on that node's own GPU**. There is no multi-node
-(DDP) training and no DPO / preference training: both templates were removed
-because neither had a working implementation behind it, and they come back
-only together with one.
+Every run is **single node, on that node's own GPU**. Two templates were removed
+in 0.5.27 because neither had a working implementation behind it, and each comes
+back only together with one and a proven run:
+
+| Removed | Why |
+|---|---|
+| `dpo-preference` | It offered chosen/rejected preference pairs, but there is no DPO trainer here: the runner would have space-joined prompt, chosen and rejected into one supervised string and trained the model **on the rejected answer** |
+| `distributed-ddp` | It offered multi-node data parallelism, which has no launch path at all (the container-spawn build refuses it and the host `torchrun` path has no rendezvous), so the tile only ever produced a failed run |
+
+The Distributed Training quick-start tile, the wizard's multi-node toggle and node
+count, and the "Distributed Training" guide page went with them.
 
 ## How training runs
 
@@ -26,23 +33,34 @@ mounted read-write, datasets read-only, the runner and container config are
 staged into the job dir, and `peft` is pip-shimmed at launch. Cancelling a job
 tears down the container.
 
-<Warning>
-**The training image is built locally.** Training, merge and quantization jobs
-run in `ainode-quant:0.17.0-t5`, built from `scripts/Dockerfile.quant` in the
-product repo. CI does not build it and no registry carries it, so a node has to
-build it once before its first job (on an aarch64 GB10, where the base engine
-image is already pulled):
+### The training image
+
+Training, merge and quantize jobs all run in the same GPU image, and **CI
+publishes it** as of 0.5.28. A job resolves it in this order:
+
+| Order | Image |
+|---|---|
+| 1 | `$AINODE_TRAIN_IMAGE` / `$AINODE_QUANT_IMAGE`, an operator's explicit override. A quantize job reads `AINODE_QUANT_IMAGE` first, a training job `AINODE_TRAIN_IMAGE` first |
+| 2 | `ghcr.io/getainode/ainode-train:<this AINode version>`, the release image. Published, so a fresh node pulls it (about 8.6 GB to download, about 22 GB on disk) |
+| 3 | `ainode-quant:0.17.0-t5`, the tag four Sparks built by hand in June 2026 and nothing else in the world has |
+
+The release image is built by `.github/workflows/publish-train-image.yml` on a
+`train-v*` tag or a manual dispatch, on the self-hosted aarch64 runner. An
+`alias_versions` input lets one 22 GB build answer for several releases; an alias
+tag re-uploads nothing.
+
+Until 0.5.27 only (3) existed and CI published nothing, so every training,
+quantize and merge job on a node that had not built it died with `docker` exit 125
+and a log the operator had to decode. AINode now checks the image with
+`docker image inspect` **before** launch, and the preflight error names all three
+candidates with the pull, the build and the override:
 
 ```bash
-git clone https://github.com/getainode/ainode && cd ainode
 docker build -f scripts/Dockerfile.quant -t ainode-quant:0.17.0-t5 .
 ```
 
-AINode checks for the image before every spawned container and fails the
-submit with that build command when it is missing, instead of a bare docker
-error in the job log. `AINODE_TRAIN_IMAGE` / `AINODE_QUANT_IMAGE` point it at an
-image the node already has.
-</Warning>
+A docker that is missing or not answering is reported as a broken docker, not as a
+missing image.
 
 ### What a run does on a GB10
 
@@ -53,12 +71,37 @@ image the node already has.
   you are on a GPU where SDPA works.
 - Padding is dynamic per batch, and labels are masked to `-100` on padded
   positions, so the loss is over your text and not over pad tokens.
-- Two gates fail the job rather than report success: a non-finite loss or
-  gradient norm aborts the run with `AINODE_ERROR:NAN_LOSS` and saves nothing,
-  and every saved `*.safetensors` is scanned for non-finite values
-  (`AINODE_ERROR:NAN_WEIGHTS`).
+- Two gates fail the job rather than report success. HuggingFace's
+  `logging_nan_inf_filter` is **off**, because it silently replaces a NaN loss
+  with the running mean, which is how a dead run logged a tidy `loss: 0.0` for its
+  last 20 steps. An `on_log` callback aborts the run with
+  `AINODE_ERROR:NAN_LOSS`, naming the metric and the step, the moment loss or
+  grad_norm goes NaN or inf, so nothing is saved. After a successful save the
+  runner reads its own `*.safetensors` back and fails with
+  `AINODE_ERROR:NAN_WEIGHTS` if any tensor holds a non-finite value, because the
+  artifact is the only thing that speaks for the run.
 - The first 20 steps are logged one by one, then at the configured cadence, so
   the loss chart in the browser is real where it matters.
+
+<Note>
+Why this exists: AINode had completed exactly one LoRA run in its life, and that
+run's adapter was **100 percent NaN**, 2,162,688 of 2,162,688 values, merged into a
+model with NaN in every q/k/v/o projection. Its `trainer_state.json` said what
+happened and nobody read it: loss 12.61 at step 10, which is the uniform-random
+baseline for that vocabulary (ln 151936 = 11.93), grad_norm 3.3 million, NaN from
+step 20, and `COMPLETED` at the end.
+
+Two independent faults, both reproduced on a Spark against the shipped runner
+before anything was changed. The kernels refusing to launch on sm121 was one.
+The other was tokenization padding every sequence to `max_seq_length` and copying
+the padded `input_ids` into `labels`, so roughly 90 percent of the positions asked
+the model to predict the pad token: that is where the 12.61 loss and the
+six-orders-too-large gradient came from.
+
+Same experiment, same node, same 20 steps: eager attention and masked labels give
+loss 5.11 falling to 2.13 with grad_norm 8.2 at step 1, against the unchanged
+runner's 11.93 and NaN.
+</Note>
 
 ## Workflow
 
@@ -82,12 +125,31 @@ You can:
 
 You can also reference a Hugging Face dataset by ID (`tatsu-lab/alpaca`).
 
-<Note>
-Datasets produced by **AutoData** register with the Dataset Manager and get a
-`dataset_id`, but AutoData writes ShareGPT rows (`{"conversations": [...]}`),
-which the training runner does not tokenize yet. Convert them to one of the
-three shapes above before training on them.
-</Note>
+**Conversation rows work now.** AutoData writes `{"conversations": [...]}`, and
+until 0.5.28 the runner had no branch for it, so the documented handoff died in
+`dataset.map` with an IndexError and the `sharegpt-chat` template advertised the
+same unusable shape. A dataset whose rows carry a `conversations` or a `messages`
+column is rendered through `tokenizer.apply_chat_template`, with both spellings
+mapped onto chat roles:
+
+| Written as | Read as |
+|---|---|
+| ShareGPT / AutoData `from` + `value` | `role` + `content` |
+| OpenAI `role` + `content` | As is |
+
+Speaker names are mapped through an alias table (`human`, `prompter` to `user`;
+`gpt`, `bot`, `model`, `chatgpt` to `assistant`; `function`, `observation` to
+`tool`). Anything unrecognised is treated as a **user** turn, which is the safe
+direction: it is supervised text either way, and it never claims the model said
+something. A tokenizer with no chat template falls back to plain text.
+
+<Warning>
+**The whole rendered conversation is supervised**, the same way the
+prompt/completion and instruction/output branches supervise their whole string.
+Masking everything but the assistant turns needs per-turn tokenization of
+template prefixes, which is template-dependent. It is not implemented, so nothing
+claims it.
+</Warning>
 
 ### 2. Launch the wizard
 
@@ -116,13 +178,74 @@ Click **Merge Adapter** to merge LoRA weights into the base model via
 `PEFT.merge_and_unload()`. The merged model can be loaded into vLLM. (This
 action is state-gated and runs in the spawned GPU container.)
 
-<Note>
-**Resume from checkpoint** (`POST /api/training/jobs/{id}/resume`) exists in
-the API but does not work in the shipped container mode: the resumed job is
-given the orchestrator's checkpoint path and the source job's directory is not
-mounted into the new container, so the run fails with "Can't find a valid
-checkpoint". Treat a failed or cancelled run as something to start over.
-</Note>
+### Resume from a checkpoint
+
+`POST /api/training/jobs/{id}/resume` works in container mode as of 0.5.28. It
+accepts a failed, cancelled or completed job and answers **409** otherwise, picks
+the highest `checkpoint-N` or the one you name in `{"checkpoint": "<name>"}`, and
+creates a **new** job named `resume-<job_id>` with its **own** `output_dir` rather
+than writing a second run's checkpoints into the first run's directory.
+
+The whole source job dir is mounted **read-only at `/src`** and the checkpoint path
+is rewritten into it. The 201 answer carries `resume_job_id`, `source_job_id`,
+`checkpoint`, `checkpoint_path`, `output_dir`, `available_checkpoints` and
+`status`; a launch the engine refuses answers 400.
+
+Before that, the orchestrator's checkpoint path went to the container unchanged
+with the source job dir unmounted, so HuggingFace answered "Can't find a valid
+checkpoint".
+
+## Jobs survive a restart
+
+`TrainingManager` used to hold its jobs in memory only, so a restart emptied the
+Runs table, zeroed the stats tiles, and 404'd merge, resume, logs and artifact
+download for every earlier job while real job dirs sat on disk.
+
+Each job now writes **`status.json`** into its own job dir at every transition (the
+status setter does the write, because eight places move a job's status and one of
+them forgetting is how the registry drifts from disk again), atomically, carrying
+the status, the config with secrets stripped, when it was written, and a schema
+version. The registry is rebuilt from the jobs directory at construction, and
+nothing is started or adopted by that pass.
+
+The jobs directory is the `training_dir` from **Config, Storage** when one is set,
+and `<AINODE_HOME>/training/jobs` otherwise.
+
+| Case | What happens |
+|---|---|
+| A job that was RUNNING or PENDING when the process stopped | Comes back **failed**, with a note saying the process did not survive the restart. A phantom RUNNING job blocks the queue |
+| A job dir written before the release that added the status file | A best-effort verdict from what is on disk: completed if it left weights, failed otherwise; a quantize job judged by its checkpoint in the models store. Always with a `note` saying so, marked `restored`, and with **no `start_time`**, because the stats count GPU hours from it and a duration nobody recorded must not be invented |
+| A directory with neither a status file nor a config | Not a job. That is what keeps thousands of empty dirs out of the history |
+
+### The queue advances on its own
+
+The queue used to advance only from a submit or a resume, so a second queued job
+waited for a human to submit a third. A job's monitor now tells the manager when
+its process exits, and a next job that cannot start is reported on the finished
+job's log rather than raised out of the monitor task.
+
+### A job the engine cannot launch is a 400
+
+`TrainingJob.start()` used to set the job RUNNING and claim the active slot before
+the launch command was even built, so a submit the engine refuses returned a 500
+and left a phantom RUNNING job blocking every later job until someone deleted it by
+hand. RUNNING, `start_time` and the active slot are now set only after `Popen`
+returns a process, and a refusal marks the job failed while
+`POST /api/training/jobs` answers **400** with the reason.
+
+### The Hugging Face token stays out of job files and job logs
+
+It used to be serialized into each job's `config.json` and
+`config.container.json` (mode 644, in a directory the job API reads) and spelled
+out as `-e HF_TOKEN=<token>` in the launch line appended to the job log that
+`GET /api/training/jobs/{id}/logs` serves.
+
+Training, quantize and merge now pass it through an `--env-file` written **0600**
+and deleted when the container exits, the token is stripped from the config written
+to disk, and every launch line is logged through one scrubber that masks secret env
+values. A job's status is served by `GET /api/training/jobs` with auth off by
+default, so the token is masked to `***` there too: the key stays, so a caller can
+still see that a job has one.
 
 ## Configuration
 

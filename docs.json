@@ -51,6 +51,7 @@
               "quickstart",
               "installation",
               "cluster-setup",
+              "desktop",
               "troubleshooting",
               "acknowledgements"
             ]
@@ -71,11 +72,31 @@
             ]
           },
           {
+            "group": "Cluster",
+            "pages": [
+              "cluster/joining",
+              "cluster/versions",
+              "cluster/endpoint",
+              "cluster/head-restart"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/api-keys",
+              "security/tls",
+              "security/rate-limits",
+              "security/discovery",
+              "guides/secrets"
+            ]
+          },
+          {
             "group": "Operations",
             "pages": [
               "ops/role",
+              "ops/doctor",
               "ops/networking",
-              "guides/secrets",
+              "ops/metrics-retention",
               "ops/release-flow"
             ]
           }
@@ -91,6 +112,7 @@
               "api-reference/chat",
               "api-reference/models",
               "api-reference/training",
+              "api-reference/audio",
               "api-reference/metrics",
               "api-reference/cluster",
               "api-reference/bench"

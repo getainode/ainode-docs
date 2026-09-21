@@ -9,11 +9,13 @@ description: "Inspect the cluster, load a model on any node, launch one model ac
 |---|---|---|
 | GET | `/api/nodes` | All discovered nodes (incl. per-node `instances[]`) |
 | GET | `/api/cluster/resources` | Aggregated VRAM + GPU counts + per-node breakdown |
+| GET | `/api/cluster/endpoint` | The fleet's addresses. **No API key needed.** See [Surviving the master](/cluster/endpoint) |
+| POST | `/api/cluster/join` | Join a node with a token, on the master. **No API key needed** |
+| POST | `/api/cluster/join-self` | The same join performed by the joiner |
 | GET | `/api/cluster/info` | Cluster topology |
 | GET | `/api/status` | This node's status |
 | POST | `/api/cluster/load` | Load a model on any one node (`{node_id, model, ...}`) |
 | POST | `/api/cluster/unload` | Unload a model on any node (`{node_id, model}`) |
-| GET | `/api/sharding/plan?model=` | What a multi-node launch of a given model would look like on the nodes available |
 | POST | `/api/sharding/launch` | Launch one model across several nodes (see below) |
 | GET | `/api/sharding/status` | The state of the distributed instances on this node |
 | POST | `/api/cluster/role` | Set this node's cluster/distributed role |
@@ -59,11 +61,42 @@ curl -X POST http://localhost:3000/api/sharding/launch \
   IP (`cluster_interface` not configured on that node).
 - `strategy` is accepted for compatibility. Any launch spanning more than one
   node is tensor parallel; there is no pipeline parallelism.
-- A distributed instance is not written to the replay manifest, so it is not
-  relaunched automatically after the head restarts.
+- The shape is persisted to `<AINODE_HOME>/distributed.json`, not to the solo
+  replay manifest. After a restart the head adopts the engine container it is
+  still running, or relaunches the recorded shape once when every peer answers
+  the ssh probe, or marks the record degraded and says which peer answered what.
+  See [A head across a restart](/cluster/head-restart).
 
-`GET /api/sharding/plan?model=<id>` previews the launch, and
 `GET /api/sharding/status` lists the distributed instances on this node.
+
+<Note>
+`GET /api/sharding/plan` and the Models view's "Shard Across Cluster" preview were
+removed in 0.5.28. The plan was invented: `ShardingPlanner` sized a model as
+params times 2 bytes from a Llama-3.x-era name table (an NVFP4 27B came out as
+54 GB, a name it could not parse as a flat 14 GB), and its "Launch Sharded" button
+posted the model id alone, so `min_nodes` stayed 1 and the call fell through to a
+plain solo load on the local node while toasting "Sharded model launching". A card
+for a model that needs more than one node now points at the right-panel **LAUNCH
+INSTANCE**, which posts the picked `node_ids` and genuinely launches TP = node
+count.
+</Note>
+
+## Re-loading a model that is already distributed
+
+`POST /api/cluster/load` for a model this node is already serving across several
+nodes is refused with a **409 naming the width and the peers**, instead of stopping
+the distributed engine and bringing the model back on one node. Loading a
+*different* model beside the head still stacks. See
+[A head across a restart](/cluster/head-restart).
+
+## A launch refused over a missing engine image
+
+A load or a distributed launch that cannot get its engine image now reports
+**which image**, what docker said, and the fixes (pull the tag, build it from the
+Dockerfile the product repo ships, or point the instance at an image the node
+has). Through 0.5.28 the launch returned a bool, so the reason stayed in the
+node's log while the API answered "Failed to launch engine": the one failure an
+operator can always fix, reported as the one thing they cannot act on.
 
 ## Set role / id
 
@@ -155,7 +188,58 @@ curl http://localhost:3000/api/cluster/resources
 ```
 
 <Note>
-`total_gpus` counts one GPU per node. `distributed_instances` lists the
+`total_gpus` sums each node's `gpu_count` off its announcement, so a multi-GPU node
+counts as all of its GPUs. Through 0.5.27 the collector read device 0 only and the
+cluster counted one GPU per node, so castor's four Tesla V100s announced one 32 GB
+GPU and the fleet's nine GPUs read as six. `distributed_instances` lists the
 multi-node launches in the cluster. The `ray_status` and `ray` fields describe
 the in-process Ray autostart, which is off in every shipped configuration.
 </Note>
+
+## Honest VRAM figures
+
+`available_vram_gb` is what is actually free, summed from real per-node usage. It
+used to be a copy of `total_vram_gb`, so the cluster view showed an empty fleet
+with six models loaded across five nodes.
+
+| Field | Meaning |
+|---|---|
+| `available_vram_gb` | Summed from real per-node usage. `null` when not one node can say, rather than the total twice |
+| `available_vram_is_floor` | `true` when at least one node could not report usage, so the total is a floor |
+| `vram_unknown_nodes` | The nodes that could not say |
+| `vram_used_gb`, `vram_free_gb` | Per node, on the same terms |
+
+A node that does not report memory use is **not counted as free**. The browser
+follows: such a node is no longer treated as wholly free by the launch hint or the
+auto-placement recommender.
+
+## Unified memory, and n/a where nothing measured
+
+On a GB10, NVML answers `NVMLError_NotSupported` for memory, so such a node
+reports `memory_kind: "unified"`, and usage is the one figure AINode actually
+knows: the sum of `gpu_memory_utilization` across the engines it launched, with
+`memory_used_source: "engine_reservations"`. The host reading is still reported, as
+`system_memory_used_mb`, labelled as system memory and **never as VRAM**.
+
+GPU utilisation on such a device travels as `null`, from the collector through the
+announcement to the row, and the interface draws "n/a (not exposed here)" rather
+than a number: `nvidia-smi` on a GB10 prints `0 %` next to `[N/A]` memory, and
+published as a percentage that 0 read as an idle node on every node in the fleet
+while they were serving requests. A discrete GPU is unaffected, so a 0 on castor's
+V100s still means idle.
+
+## Which node wears the crown
+
+Every `/api/nodes` row carries `effective_role` and `is_leader` from the same
+election `get_master()` uses. With no role information **no node wears a crown**:
+the old row-order fallback crowned `incoming[0]`, which is always the local node,
+so Spark-3's dashboard crowned Spark-3 and Spark-4's crowned Spark-4 while the
+Config view's members table showed the real master from the same server.
+
+## Addresses
+
+A `/api/nodes` row carries `localhost` for **exactly one node**, the local one. For
+a peer it carries the address its announcement arrived from, which is the
+management-LAN address a browser is on, falling back to the fabric IP. For a client
+on another machine, use [`/api/cluster/endpoint`](/cluster/endpoint), where
+`localhost` is never an answer.

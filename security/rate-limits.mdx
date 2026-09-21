@@ -1,0 +1,136 @@
+---
+title: "Rate limits"
+description: "A per-client token bucket and a concurrency cap on /v1, so one caller cannot occupy every engine in the cluster."
+icon: "gauge"
+---
+
+Off by default. When you turn it on, AINode applies two per-client limits to
+`/v1` traffic: a token bucket on request rate, and a cap on how many requests
+one client may have in flight at once. The concurrency cap is the one that
+matters: without it, a single client can open two hundred concurrent completions
+and occupy every engine in the fleet.
+
+## The config block
+
+```json
+{
+  "rate_limit": {
+    "enabled": true,
+    "requests_per_minute": 600,
+    "burst": 60,
+    "max_inflight": 8
+  }
+}
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `enabled` | `false` | Whether anything is limited at all |
+| `requests_per_minute` | `600` | Token bucket refill rate, per client |
+| `burst` | `60` | Bucket size. `0` means no bucket, only the concurrency cap |
+| `max_inflight` | `8` | Concurrent requests per client. `0` means no concurrency cap |
+
+The values above are sane for one GB10 node serving a handful of people. Every
+key is read tolerantly: a bad number falls back to its default rather than
+raising, because this block is read on the boot path and a typo must not be the
+reason a node has no API.
+
+<Note>
+This block is **not** in `PATCHABLE_CONFIG_FIELDS`, and there is no CLI subcommand
+and no dashboard control for it. Turning limits on is an edit to `config.json` plus
+a restart.
+</Note>
+
+## What a client is
+
+**An API key id when the request carries one, otherwise the remote IP address.**
+The key id comes from the auth middleware, which has already validated the token
+by the time the limiter runs, so two people behind one NAT are two clients when
+they hold different keys, and one person with one key is one client from five
+machines.
+
+<Warning>
+`X-Forwarded-For` is deliberately ignored. It is caller-supplied, so a limiter
+keyed on it is a limiter anybody bypasses by varying the header. Behind a
+reverse proxy every unkeyed caller therefore collapses into one bucket, which is
+why a node behind a proxy should [require API keys](/security/api-keys).
+</Warning>
+
+## What is limited, and what is exempt
+
+Only paths under **`/v1/`** can be refused. Everything else is exempt:
+
+| Exempt | Why |
+|---|---|
+| `/api/*` | The dashboard's own polling lives here and would trip any limit worth setting. A browser left open on the Config page must never rate-limit the operator out of their own node |
+| `/api/health` | What a probe and a peer's liveness check call |
+| The static shell | Files, not engine work |
+
+None of those touch an engine, so none of them are limited.
+
+## The 429
+
+A refusal is HTTP **429** with a `Retry-After` header and a body naming which
+limit was hit, because "too many requests" without a number is not something a
+client author can act on:
+
+```json
+{
+  "error": {
+    "message": "too many requests in flight for this client (limit 8). AINode caps concurrency per client so one caller cannot occupy every engine. Retry in 1s.",
+    "type": "rate_limit_error",
+    "limit": "max_inflight",
+    "limit_value": 8,
+    "retry_after": 1
+  }
+}
+```
+
+`limit` is `max_inflight` or `requests_per_minute`. The envelope matches the
+auth middleware's shape, so one client-side error handler covers both.
+
+`Retry-After` is exact for a bucket refusal (the time until the next token) and
+**1 second** for a concurrency refusal, which clears when somebody else's
+request finishes and so cannot be timed.
+
+## Streaming
+
+A streaming answer holds its in-flight slot until the stream ends, not until the
+first byte: the SSE passthrough calls `write_eof` before the handler returns, and
+the slot is released in the handler's `finally`.
+
+## Ordering with auth
+
+The limiter is the **innermost** middleware, registered inside the auth middleware,
+so `api_key_id` is already stamped when it runs. On a node that requires a key, an
+unkeyed request never reaches the limiter at all, so **a 401 spends no token**, and
+a keyed request is counted against its key rather than its address.
+
+## What reports the state
+
+`GET /api/status` carries a `rate_limit` block: the four config keys plus a
+one-line `label`, `clients_tracked` and `inflight`. The label is one of:
+
+| `label` | When |
+|---|---|
+| `no rate limit, one client can occupy every engine` | Off |
+| `600/min, burst 60, 8 in flight per client` | On, with those values |
+| `rate limiting on with no limit set, so nothing is refused` | On, with both limits at 0 |
+
+`ainode doctor` prints the same line as an **INFO** check (`ratelimit.state`),
+either way: a fact about the node, not a judgement.
+
+## The join route has its own limit
+
+`POST /api/cluster/join` is exempt from the API key rule, so it carries a limiter
+of its own inside the handler: **5 attempts per 60 seconds per source address**,
+independent of this `rate_limit` block and on whether it is enabled. Its refusal is
+a 429 with `Retry-After: 60` and `"type": "rate_limited"`. See
+[Joining a node](/cluster/joining).
+
+## Memory
+
+Buckets are per client, and an open port on the internet can invent an address
+per request, so past **4096** tracked clients the idle ones are dropped. A
+client at full tokens with nothing in flight has no state worth keeping:
+recreating it gives exactly the same answer.

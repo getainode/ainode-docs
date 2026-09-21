@@ -1,0 +1,186 @@
+---
+title: "Joining a node"
+description: "Mint a token on the master, run one command on the new node. No hand-edited config.json."
+icon: "plug"
+---
+
+Joining a node used to mean typing `cluster_id`, `cluster_role` and
+`cluster_interface` into `config.json` on the new box, and once discovery became
+signed, `cluster_secret` as well. Nothing in the product did it for you, while
+"automatic clustering" was the headline claim. Two commands do it now.
+
+## The two commands
+
+On the **master**:
+
+```bash
+ainode cluster token
+```
+
+It mints 32 random bytes, keeps only their SHA-256 hash, and prints the line to
+paste. A master that has no `cluster_secret` yet gets one generated and saved at
+the same time, and says so. On the **new node**:
+
+```bash
+ainode join <master-host>:3000 <token>
+```
+
+That writes the cluster's identity into the new node's `config.json` and restarts
+the service.
+
+`ainode cluster tokens` lists the tokens that are still valid.
+
+## The token
+
+| Property | Value |
+|---|---|
+| Entropy | 32 random bytes (64 hex characters) |
+| Stored as | SHA-256 hash only, in `<AINODE_HOME>/join-tokens.json`. The token itself is never written down |
+| Lifetime | 30 minutes by default. `ainode cluster token --ttl SECONDS` changes it, between 30 seconds and 24 hours |
+| Uses | One. A spent token is refused |
+
+A spent or expired record is kept for 24 hours before it is pruned. Only the hash
+is stored, so the record is not a credential; it is kept briefly so an operator
+reading the file can see a token **was** used rather than only that it is gone.
+
+## What `ainode join` writes
+
+Exactly these keys, merged into the raw JSON, leaving **every other key in the
+file byte for byte as it found it**:
+
+| Key | Value |
+|---|---|
+| `cluster_id` | The master's cluster id |
+| `cluster_role` | `worker` |
+| `distributed_mode` | `member` |
+| `master_address` | The master's address, when the master sent one |
+| `cluster_secret` | The cluster's shared secret, when the master sent one |
+| `discovery_port` | The cluster's discovery port, when the master sent one |
+| `node_name` | Only when you passed `--name` |
+| `cluster_interface` | Only when you passed `--interface` |
+
+Every value below `distributed_mode` is written only when the master actually
+sent one: an empty answer must never **clear** a value the node already had.
+
+<Note>
+The config carries two spellings of one decision, and a join writes both.
+`cluster_role` is `auto` / `master` / `worker`: who may be elected head. A joiner
+takes `worker`, because it is joining somebody else's cluster and must never win
+the election (`member` is not a value that field accepts; the `PATCH /api/config`
+validator rejects it). `distributed_mode` is `solo` / `head` / `member`: whether
+this node runs an engine of its own. A joiner takes `member`, which is what
+`ainode role worker` and the installer's `--job worker` already write.
+</Note>
+
+A `NodeConfig.save()` round trip would write every field of the dataclass, which
+on an older `config.json` silently **adds** every key that release happens to
+default differently and **drops** anything the dataclass does not know. Joining
+must not do that, so it merges rather than saving.
+
+## What it prints
+
+```
+  Joining the cluster at 10.0.0.1:3000 ...
+  Joined.
+    cluster_id        ainode-cluster
+    master_address    10.0.0.1:3000
+    discovery_port    5679
+    cluster_role      worker  (distributed_mode=member)
+    cluster_secret    set (hidden)
+  Written to /root/.ainode/config.json. No other key was touched.
+```
+
+When the master sent no secret it says so in as many words: *discovery on this
+cluster is unauthenticated*. See [Signed discovery](/security/discovery).
+
+## The flags
+
+| Flag | What it does |
+|---|---|
+| `--name NAME` | The name this node announces (capped at 64 characters) |
+| `--interface NIC` | Pin the NIC the cluster fabric binds. Empty means autodetect at startup |
+| `--allow-version-mismatch` | Join even when the master runs a different AINode release |
+
+## The version check
+
+A join is **refused** when the master's release differs from this node's, because
+the discovery announcement is the cross-version contract. Pass
+`--allow-version-mismatch` to override it.
+
+A master that announces no version at all (a release older than the one that put
+it on the wire) is not a refusal: there is nothing to compare, and refusing would
+make this node unable to join the fleet it belongs to.
+
+## What the address accepts
+
+`ainode join` takes what an operator actually pastes: a bare IP, `ip:3000`, a
+`http://ip:3000` copied out of a browser, a trailing slash, and a bracketed IPv6
+literal. A host with no port means **3000**.
+
+## Join as part of the install
+
+```bash
+AINODE_JOIN="10.0.0.1:3000:<token>" curl -fsSL https://ainode.dev/install | bash
+```
+
+`AINODE_JOIN` is `"<host>[:<port>]:<token>"`. The token is the last
+colon-separated field, so a host with a port still parses.
+
+The join runs **after** the service is up, deliberately: it is an HTTP call to the
+master plus a config write, and a node that fails to join is still a working
+node. When it fails the installer says so and prints the `ainode join` line to
+retry with a fresh token.
+
+`AINODE_JOIN` is mutually exclusive with `--job master`: one joins an existing
+cluster, the other heads its own.
+
+## Join from the dashboard
+
+The **new node's own** dashboard has a **Join a cluster** card under **Config,
+Cluster**: paste the master's address and the token there instead of using the
+CLI. It performs the same join in-process and writes the same keys.
+
+It deliberately restarts nothing. Restarting the service from inside the request
+that asked for it would kill the response before the browser could read it, so
+the answer carries the command to run instead.
+
+## The two HTTP routes
+
+| Route | Runs on | Key required |
+|---|---|---|
+| `POST /api/cluster/join` | The **master** | **No**. A node that has not joined cannot hold this cluster's key, so the join token is the credential instead. Rate limited to five attempts a minute per source address inside the handler, because there is no key in front of it to do it |
+| `POST /api/cluster/join-self` | The **joiner** | Yes. It is this node's own operator asking this node to join something. Takes `{host, token, name?, interface?, allow_version_mismatch?}` |
+
+A wrong token, an expired token and a spent token all get **one identical 403**.
+Telling them apart would make the route an oracle for guessing:
+
+```json
+{
+  "error": {
+    "message": "That join token is not valid. Tokens expire (30 minutes by default) and work once. Mint a fresh one on the master with: ainode cluster token",
+    "type": "join_refused"
+  }
+}
+```
+
+Too many attempts is a **429** with `Retry-After: 60`:
+`Too many join attempts from this address. 5 per 60 seconds.`
+
+A successful join answers 200 with `cluster_id`, `cluster_secret`,
+`discovery_port`, `master_address`, `master_node_name` and `ainode_version`. That
+version is what the joiner's own check compares itself against.
+
+A successful join is logged on the master with the token id and the joining node's
+name, because handing over the cluster secret is the one event on that node an
+operator will want to find afterwards.
+
+## Restarting
+
+A freshly joined node is the one place `ainode join` restarts the service itself:
+the config it just wrote is only read at startup, and the node is not serving
+anything yet. Where there is no systemd unit to reach (the usual case, because
+this CLI runs inside the container), it prints the command instead:
+
+```bash
+sudo systemctl restart ainode
+```

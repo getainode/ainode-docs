@@ -1,0 +1,131 @@
+---
+title: "A head across a restart"
+description: "What a distributed head does when it comes back: adopt the engine it is still running, or say which peer went missing."
+icon: "rotate"
+---
+
+A restart of the orchestrator does not touch the engine containers. They are
+siblings spawned through `docker.sock`, so after a `systemctl restart ainode` or
+an `ainode update` the engine keeps serving while the new process has no record of
+it.
+
+On a distributed head that divergence used to be total: the launch was
+deliberately never written down, the `InstanceManager` started empty, and the
+node's own view of what it ran was reconstructed from `config.json` by three
+separate fallbacks. An UNLOAD naming the head's port matched nothing, and once the
+container did stop the model was gone with nothing to bring it back.
+
+Three things happen now, in the order a boot uses them.
+
+## 1. Adoption: a read, not a relaunch
+
+Before anything launches and before the sweep, the node asks `docker inspect`
+about the engine containers a launch on this node would have created. A **running**
+one goes into the `InstanceManager` with the shape the container is actually
+running, parsed from its own argv:
+
+| Field | Read from |
+|---|---|
+| Model | `--served-model-name`, or the serve target |
+| Width | `--tensor-parallel-size` |
+| Port | `--port` |
+| `mp` executor | `--nnodes` |
+
+The container's argv is the authority on purpose: `config.json` can have been
+edited since the launch, and a stacked container whose manifest write never
+happened has no other account at all.
+
+Adoption contacts no peer and relaunches nothing. An adopted record carries
+`adopted: true`, so every consumer can tell a reconstructed instance from one this
+process launched.
+
+The result is that `/api/status`, `/api/nodes`, `/v1/models` and the cluster
+graphic describe a real instance **from the first poll**, rather than after the 6
+to 12 minute bind.
+
+<Note>
+A container that is running but still loading is adopted too, with
+`status: starting` from the localhost probe, because a 6 to 12 minute bind is
+exactly the window in which the node's view was wrong. An exited container is left
+for the sweep.
+</Note>
+
+### Orphaned stacked containers
+
+A live container on a stacked port that neither the manager nor `instances.json`
+knows about, which is what a crash between a launch and the manifest write leaves
+behind, is adopted the same way **and written back into the manifest**, so the
+next restart replays it.
+
+### A member adopts nothing
+
+A node in `member` mode adopts nothing and replays nothing. Its containers were
+placed by whichever head SSHed in, and a member launches nothing of its own.
+
+## 2. The record: `distributed.json`
+
+The distributed shape is persisted to `<AINODE_HOME>/distributed.json` on a
+successful launch and removed on unload. It holds the model, the port, the peers,
+the width, the executor, the container name, the SSH user, the launch overrides,
+and a `status` of `serving` or `degraded`.
+
+Adoption refreshes it, which matters because an mp head can be a **config** state
+rather than a launch: on a node whose head came up from `config.json` there is no
+launch call to have written the record.
+
+The unload path removes it, matched on model **and** port, so unloading a
+neighbour never clears it.
+
+<Note>
+It is a separate file from `instances.json` on purpose. That manifest is replayed
+entry by entry as single-node loads, so a distributed shape in it would come back
+on one node.
+</Note>
+
+## 3. Replay, or degraded
+
+**Record present and container gone** is the only case that may relaunch, and only
+when **every peer answers the same ssh probe the launch itself depends on**:
+
+```bash
+ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+  <ssh_user>@<peer> docker version
+```
+
+If a peer does not answer, or the relaunch fails, the record is stamped
+`degraded` with **which peer answered what**, and that is surfaced in three
+places:
+
+| Where | What you see |
+|---|---|
+| `ainode doctor` | A **WARN** on `cluster.distributed`, with the peer named in the fix line |
+| `GET /api/status` | `degraded_instances` |
+| The dashboard | One banner in the top bar, next to the update badge |
+
+**One attempt per process.** Never a retry loop: a launch that needs a human is
+not improved by trying it again every ten seconds. It waits for a human or the
+next restart.
+
+A relaunch takes the node's launch slot and holds it until the engine **binds**,
+the same contract every other launch path follows, so a UI load cannot profile
+alongside a distributed engine that is still reserving memory.
+
+## A solo load can no longer replace a multi-node instance
+
+With the head visible to the load path again, re-loading a model that is already
+serving here across several nodes is refused with a **409 naming the width and the
+peers**, instead of stopping the distributed engine and bringing the model back on
+one node.
+
+Loading a **different** model beside the head still stacks.
+
+## `ainode update` on a head, step by step
+
+1. The roll restarts every container.
+2. `ainode start` sweeps every engine container this node owns.
+3. The boot engine relaunches the head from `config.json`, reaching the peers over
+   ssh.
+4. Adoption finds that container and puts it in the manager with its real shape.
+
+If the head container is gone when the process comes up, the record decides:
+peers answer, it relaunches once; a peer does not, it goes degraded and says so.

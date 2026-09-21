@@ -1,0 +1,102 @@
+---
+title: "Surviving the master"
+description: "GET /api/cluster/endpoint hands a client the fleet's addresses, so one node going down no longer strands it."
+icon: "route"
+---
+
+Routing is replicated. The address is not.
+
+Every AINode proxies every model the fleet serves, so any node can answer for any
+client. But a client holds **one** address, so an outage on the node it holds
+strands it while five other nodes are up and idle. Nothing in the API told it
+where else to go: `/api/nodes` reports `"host": "localhost"` for every row, which
+is the one address guaranteed wrong on the caller's machine.
+
+## `GET /api/cluster/endpoint`
+
+Answered by **every node**. Addresses and nothing else:
+
+```json
+{
+  "self":   {"name": "Spark-1", "host": "192.168.0.10", "port": 3000, "version": "0.5.29", "role": "master"},
+  "master": {"name": "Spark-1", "host": "192.168.0.10", "port": 3000, "url": "http://192.168.0.10:3000"},
+  "nodes":  [{"name": "Spark-1", "host": "192.168.0.10", "port": 3000, "version": "0.5.29",
+              "role": "master", "url": "http://192.168.0.10:3000"}],
+  "generated_at": 1789871479.29
+}
+```
+
+`nodes` carries this node, the elected master, and every online member, each with
+a URL a client can use.
+
+## No API key
+
+This route is exempt from the API key rule, alongside `/api/health`,
+`/api/auth/status` and `POST /api/cluster/join`. The reason is the endpoint's whole
+purpose: a client that cannot reach its configured node has to be able to ask a
+reachable one where the fleet is, and the key it holds is no use for finding an
+address.
+
+It carries no model, no telemetry, no config and no key material, and a test holds
+it to that. **Every other `/api/cluster/*` path still needs the key.** With auth
+enabled on a node:
+
+```
+200  /api/cluster/endpoint
+200  /api/health
+401  /api/cluster/info
+401  /api/status
+```
+
+## Which address each node reports
+
+| Row | Address |
+|---|---|
+| This node | The address the caller used, when the `Host` header names an address this node really answers on. That is the address the caller has proved it can reach: tailnet, LAN, or a name out of its own hosts file |
+| This node, with a `Host` header it does not answer on | The LAN address. The header is caller-controlled, and honouring it would let one request set what the node advertises to the next reader |
+| A peer | The source address of its announcement, then its fabric IP, then its name |
+
+**`localhost` is never an answer, in any field, on any node.** A node with nothing
+routable reports an empty host and a `null` url, because a client can skip a null
+and cannot skip a lie.
+
+`/api/nodes` keeps its deliberate `localhost` for the local row, for the browser
+sitting on that node. This endpoint is for a client on another machine, so it
+cannot.
+
+A peer's `version` comes off the discovery wire, and a peer that announces none
+reports `""`, never this node's version.
+
+## `endpoint_hint` on `/api/status`
+
+`GET /api/status` carries the same rows as `endpoint_hint`, so a client that
+already polls status learns its fallbacks with **no second request**. It is
+computed in memory: no node is probed, nothing is awaited.
+
+The derivation is cached for 60 seconds, keyed on the config fields that feed it.
+Deriving an address reads the host (an `ip` subprocess and a routing lookup) and
+`/api/status` is polled every few seconds by every dashboard for every node it
+draws, so uncached this would have put a fork on the fleet's hottest route, on the
+event loop.
+
+## How a client uses it
+
+The pattern the [desktop app](/desktop) implements:
+
+1. Poll `/api/status` on the configured address. Save `endpoint_hint` on every
+   successful poll. A node that answers status without one is asked
+   `GET /api/cluster/endpoint` once, and never again this session if it 404s,
+   which is what a node older than the list does.
+2. Drop loopback and placeholder rows on the way in. The list comes off the
+   network, and the cost of trusting it would be a client that spends an outage
+   dialling itself.
+3. In the steady state probe only the configured address, the same cost as before.
+   **Only when that does not answer** fan out to the saved nodes, master first,
+   and stay on whichever one answers.
+4. Go back to the configured address as soon as it answers, so the client returns
+   home instead of living on a fallback until the next restart. Keep a working
+   fallback while the primary is still down, so two live nodes do not make the
+   client flap between them.
+5. Say who is serving, when it is not the configured node.
+
+A node that reports no list leaves a client's behaviour exactly as it was.

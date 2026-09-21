@@ -1,0 +1,85 @@
+---
+title: "Versions on the wire"
+description: "Every node announces its release, so a fleet split across two versions is visible instead of looking healthy."
+icon: "tags"
+---
+
+A fleet running two releases used to look exactly like a fleet running one, which
+is the state every partial roll leaves. Nodes did not put their version on the
+wire, so there was nothing anywhere to say so.
+
+That matters more than a cosmetic gap, because **the discovery announcement is
+the cross-version contract**: 0.5.25 changed how a head's instances are merged
+into `instances`, so a 0.5.24 reader and a 0.5.25 sender were exchanging
+different data with nothing to say so.
+
+## Where the version travels
+
+`ainode_version` rides on the discovery announcement and through `ClusterNode`
+into:
+
+| Surface | What it carries |
+|---|---|
+| `GET /api/nodes` | `ainode_version` on every row |
+| `GET /api/cluster/resources` | The same, on its node list |
+| `GET /api/version/check` | Per-node rows plus the split verdict (below) |
+| `GET /api/cluster/update-status` | The version each node is announcing right now against the target |
+| `GET /api/cluster/endpoint` | `version` per node |
+
+## `GET /api/version/check`
+
+Alongside the local-versus-GHCR fields (`current`, `latest`,
+`update_available`), it carries:
+
+| Field | Meaning |
+|---|---|
+| `nodes` | One row per online node: `node_id`, `node_name`, `ainode_version` |
+| `versions` | The distinct releases seen, ordered **by release** rather than as strings |
+| `unknown_versions` | How many nodes announced no version at all |
+| `cluster_split` | `true` when more than one distinct release is known |
+
+The answer for the local node is the version of the process serving the request;
+a peer's is what it put on the wire.
+
+<Note>
+A peer too old to announce a version reports `""` and is counted in
+`unknown_versions` rather than folded into agreement. **Absence is not a match**:
+filling it in with the local version is how a split fleet goes on looking
+healthy.
+</Note>
+
+## The split banner
+
+When `cluster_split` is true, the dashboard draws a banner in the header next to
+the update badge, naming each release and the nodes on it:
+
+```
+Fleet split across 2 releases: 0.5.28 (Spark-1, Spark-2)  0.5.29 (Spark-3, castor)
+```
+
+Its tooltip says why it matters: *these nodes are not running the same AINode
+release. The discovery announcement is the cross-version contract, so a split
+fleet can exchange subtly different data. Update all to converge.*
+
+A node whose version is unknown is grouped under `unknown`.
+
+## Converging
+
+Use the master's **Update all** button, or `POST /api/cluster/update-all`, which
+updates the workers first and the master last. See [Updating](/guides/update).
+
+`GET /api/cluster/update-status` additionally reports `on_target` per node and a
+`verified` flag for the whole job, because whether a node came **back** on the new
+image is a live question and not one a record written moments before a container
+stopped gets to answer. It is `null` where it cannot be told (no target, or a node
+not announcing a version) rather than `false`, which would read as failure.
+
+## Joining refuses a mismatch
+
+`ainode join` refuses when the master's release differs from the joiner's, unless
+you pass `--allow-version-mismatch`. See [Joining a node](/cluster/joining).
+
+## `ainode doctor`
+
+The peers check reports each peer it saw on discovery with that peer's version, and
+whether the fleet agrees on a release. See [Doctor](/ops/doctor).

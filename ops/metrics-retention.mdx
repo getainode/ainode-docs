@@ -1,0 +1,163 @@
+---
+title: "Metrics retention"
+description: "A node keeps 48 hours of raw samples and 30 days of roll-ups in SQLite, so a restart no longer erases what it measured."
+icon: "database"
+---
+
+Everything the collector knew used to live in memory. A restart reset the
+counters, the GPU series and the latency percentiles to nothing, the dashboard
+drew its first point from whatever the node happened to be doing a second after
+boot, and because nothing scraped the Prometheus endpoint there was no copy of
+the history anywhere else either. A node that had been serving for a week could
+not answer "was it this hot yesterday".
+
+A node now remembers what it measured.
+
+## Where it lives
+
+`<AINODE_HOME>/metrics.db`, a small SQLite file in WAL mode, stdlib `sqlite3`
+only.
+
+| Table | What it holds |
+|---|---|
+| `samples` | One row per series per tick: `(ts, series, value)` |
+| `samples_1m` | One row per series per minute: the mean, the min, the max, and how many of that minute's samples carried a value at all |
+
+The roll-up table is built forward from a watermark, so a pass costs the minutes
+since the last pass rather than a scan of the whole table.
+
+WAL mode lets the history route read while the sampler writes, and lets you open
+the file with the `sqlite3` CLI on a live node without blocking it.
+
+## Null is never zero
+
+`value` is **nullable on purpose**. A figure the node could not measure is written
+as NULL and read back as `null`. It is never interpolated, never carried forward
+from the previous tick and never written as 0.
+
+That is the rule the rest of AINode's telemetry follows: a zero is a
+measurement, and a chart draws it as one. On a GB10 the driver exposes no GPU
+utilisation counter, so that series is null, not idle.
+
+## The `metrics` config block
+
+```json
+{
+  "metrics": {
+    "enabled": true,
+    "retention_hours": 48,
+    "retention_days": 30,
+    "interval_seconds": 15
+  }
+}
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `enabled` | `true` | Whether anything is written to disk |
+| `retention_hours` | `48` | How long the raw per-tick samples are kept |
+| `retention_days` | `30` | How long the one-minute roll-ups are kept |
+| `interval_seconds` | `15` | Seconds between samples. 15 is four points a minute, which is one roll-up row's worth of detail |
+
+## What it costs
+
+**About 70 MB per node at steady state**, and it stops growing there, because a
+pruned page is reused by the next insert.
+
+Measured rather than estimated, at the defaults (15 series, a sample every 15
+seconds, SQLite 3.53, VACUUMed so the WAL is not double counted):
+
+| | Rows per day | Bytes per row | Per day | At retention |
+|---|---|---|---|---|
+| Raw samples | 86,400 | about 72 | 5.9 MB | about 12 MB (48 h) |
+| One-minute roll-ups | 21,600 | about 93 | 1.9 MB | about 58 MB (30 d) |
+
+## A read-only or full disk
+
+Writes never raise at the caller. A read-only or full disk logs **one** warning,
+the store marks itself **degraded**, and the server keeps serving:
+`/api/metrics` and `/metrics` answer exactly what they answered before retention
+existed.
+
+Losing a metrics sample is not a reason to take a node down. The degraded flag is
+on `stats()`, on `/api/metrics/history` and as
+`ainode_metrics_retention_degraded` on `/metrics`, so the loss is visible rather
+than silent.
+
+## `GET /api/metrics/history`
+
+Any series over any window.
+
+### Query parameters, all optional
+
+| Parameter | Meaning |
+|---|---|
+| `series` | Comma-separated names, or the parameter repeated. Omitted means every series the store holds. Names are the flattened snapshot keys, for instance `gpu.temperature_c` or `requests.latency_ms.p95` |
+| `since` / `until` | A unix timestamp in seconds (milliseconds are accepted and divided, so a browser can pass `Date.now()`), or a relative offset from now with a leading minus and an optional unit: `-30m`, `-6h`, `-2d`. Units are `s`, `m`, `h`, `d`. Defaults are one hour ago and now |
+| `step` | Grid width in seconds, same optional unit suffix. Defaults to the sampling interval for raw data and one minute for roll-ups |
+| `resolution` | `raw` or `1m`, to override the automatic choice |
+
+**The automatic choice** is the roll-up table whenever the window reaches back
+past the raw retention, or the step is a minute or more.
+
+The response reports the `step` it actually used, which may be coarser than asked
+for so the payload stays drawable: a whole response is capped at 5000 points,
+divided across the series requested.
+
+### The response
+
+```bash
+curl "http://localhost:3000/api/metrics/history?series=gpu.temperature_c&since=-6h"
+```
+
+```json
+{
+  "since": 1789850000.0,
+  "until": 1789871600.0,
+  "step": 60.0,
+  "resolution": "1m",
+  "points": 361,
+  "series": {
+    "gpu.temperature_c": [
+      {"ts": 1789850000.0, "value": 58.2, "min": 57.0, "max": 60.0, "samples": 4},
+      {"ts": 1789850060.0, "value": null, "min": null, "max": null, "samples": 0}
+    ]
+  },
+  "store": {
+    "enabled": true, "available": true, "degraded": false,
+    "retention_hours": 48, "retention_days": 30, "interval_seconds": 15,
+    "oldest_sample": 1789700000.0, "newest_sample": 1789871595.0,
+    "db_bytes": 71303168, "samples": 172800, "downsampled": 648000
+  }
+}
+```
+
+Every series comes back on **the same evenly spaced grid**, with `value: null` in
+any slot where nothing was measured. Null is never filled in: a gap is a gap,
+whether the sampler was down or the driver would not answer.
+
+A bad query parameter is a **400** naming it. With retention off, or a store that
+could not be opened at boot, the route answers the shape rather than an error:
+
+```json
+{"store": {"enabled": false, "available": false, "degraded": false}, "series": {}, "points": 0}
+```
+
+so a caller seeding a chart gets an empty chart and a reason instead of having to
+special-case a status code.
+
+The read runs in an executor rather than on the event loop, because a month of
+roll-ups on a busy node is not a few milliseconds and this server is also proxying
+inference.
+
+<Note>
+The existing `/api/metrics`, `/api/metrics/gpu` and `/api/metrics/requests`
+shapes are unchanged and deliberately so: they are what the dashboard, the
+discovery broadcast and every existing scrape read. The history route is additive.
+</Note>
+
+## The dashboard
+
+The dashboard's metrics buffer is seeded from disk at page load, so a chart drawn
+over it opens on the node's real recent history instead of one point from the
+moment the page loaded.

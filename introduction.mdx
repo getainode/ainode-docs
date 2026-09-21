@@ -30,7 +30,7 @@ curl -fsSL https://ainode.dev/install | bash
     `/v1` endpoints on port 3000, routed across the fleet. Works with LangChain, Open WebUI, and any OpenAI client.
   </Card>
   <Card title="Model downloads" icon="download" href="/guides/models">
-    26 catalog entries with launch recipes, or paste any Hugging Face repo ID.
+    23 curated catalog entries with launch recipes, or paste any Hugging Face repo ID.
   </Card>
   <Card title="Fine-tuning" icon="brain" href="/guides/training">
     LoRA, QLoRA, and full fine-tune from the browser, single node, in a spawned GPU container.
@@ -39,7 +39,20 @@ curl -fsSL https://ainode.dev/install | bash
     Nodes discover each other over UDP. The master routes requests to the node serving each model, or launches one model across several nodes.
   </Card>
   <Card title="Prometheus metrics" icon="chart-line" href="/api-reference/metrics">
-    `/metrics` on port 3000 for Grafana, Prometheus, VictoriaMetrics.
+    `/metrics` on port 3000 for Grafana, Prometheus, VictoriaMetrics, with 48 hours of
+    history kept on the node itself.
+  </Card>
+  <Card title="Speech to text" icon="microphone" href="/api-reference/audio">
+    `/v1/audio/transcriptions` and `/v1/audio/translations`, routed across the fleet
+    like a chat completion.
+  </Card>
+  <Card title="Auth, TLS and rate limits" icon="lock" href="/security/api-keys">
+    Require an API key from the dashboard, add HTTPS on a second port, and cap what
+    one client can hold.
+  </Card>
+  <Card title="Desktop app" icon="display" href="/desktop">
+    The dashboard as a native macOS app, with the fleet in the menu bar and failover
+    when a node stops answering.
   </Card>
 </CardGroup>
 

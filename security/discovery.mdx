@@ -1,0 +1,135 @@
+---
+title: "Signed discovery"
+description: "cluster_secret signs every UDP announcement, so one host on the broadcast domain can no longer claim to be your master."
+icon: "shield"
+---
+
+Nodes find each other by broadcasting a UDP announcement on the discovery port.
+That datagram is the whole join protocol, and it carries more than a hello: the
+cluster id, the node's role, and **the instances every peer will route
+`/v1/chat/completions` traffic to**.
+
+Until 0.5.28 nothing signed it. The election prefers any node announcing
+`role: "master"` with a low `node_id`, and the cluster id is readable
+unauthenticated over HTTP, so one host on the broadcast domain could take a
+fleet over with a single UDP packet and pull real inference to an address of its
+choosing. `cluster_secret` was declared in the config and scrubbed from
+`GET /api/config` as though it protected something, and was read by no code path
+at all.
+
+## How the signature works
+
+- **HMAC-SHA256** over the announcement, keyed by `cluster_secret`, hex encoded.
+- The digest covers the payload with sorted keys and no whitespace, so the sender
+  and the receiver agree without depending on dict order or on how either side
+  spelled its JSON.
+- The signature travels as **one extra top-level key, `sig`**, beside the
+  announcement's own fields, never as a wrapper around them. `NodeAnnouncement.from_json`
+  drops keys it does not know, so a node too old to have heard of signing still
+  parses a signed announcement and stays visible in the cluster view. That is
+  what keeps a fleet visible to itself mid-roll.
+- The digest covers the raw received mapping rather than the fields this build
+  happens to understand, so a peer running a newer build that carries additional
+  fields still verifies.
+
+## Who drops what
+
+| Receiver | Unsigned datagram | Badly signed datagram |
+|---|---|---|
+| Has a `cluster_secret` | Dropped (`unsigned`) | Dropped (`bad signature`) |
+| Has no `cluster_secret` | Accepted | Accepted |
+
+A receiver with no secret keeps the old behaviour and **warns once** that
+discovery is unauthenticated on this port. That is the migration path, not an
+oversight: a release that made signing mandatory would silently partition every
+existing cluster on upgrade.
+
+A node that does have a secret names the source, the claimed `node_id` and the
+reason **once per reason and source address**, so a forged flood cannot fill the
+log. Past **50** distinct sources it stops naming them individually and keeps
+counting in the listener's `dropped`. An unparseable datagram is dropped too.
+
+Which way a node is running is in its boot log, as *announcements signed* or
+*UNSIGNED (no cluster_secret set)*. There is no field on `/api/status` that says
+it, and no `ainode doctor` check for it: the boot log is the only signal.
+
+## Rotating the secret
+
+Both directions read the secret **per datagram**, re-reading the file when its
+mtime or size changes, rather than capturing it at startup. Rotating the key is
+therefore a `config.json` edit plus one broadcast interval (5 seconds), not a
+restart of every node. A half-written config keeps the last value that parsed
+rather than blanking a fleet's authentication.
+
+<Note>
+Rotating to a **new** value is live. **Clearing** the key at runtime is not: the
+node falls back to the value it had at boot until it restarts.
+</Note>
+
+## Where a node's secret comes from
+
+**A fresh install generates one.** The installer writes a 32-byte hex value into
+`config.json` (`openssl rand -hex 32`, or `/dev/urandom` on an image with no
+openssl), so a new node is not running unauthenticated discovery by default. It
+prints which it did and what a second node needs.
+
+Two nodes installed independently each generate their own and are **invisible to
+each other**. Joining is what copies one value onto the other:
+
+| How | What happens |
+|---|---|
+| [`ainode join`](/cluster/joining) | Writes the master's `cluster_secret` on the joining node. The master hands it over in the join response |
+| `AINODE_JOIN="<host>[:<port>]:<token>"` at install time | The same join, run by the installer after the service is up |
+| The joiner's **Config, Cluster** card (`POST /api/cluster/join-self`) | The same join, in process |
+| `ainode cluster token` on a master that has no secret yet | Generates and saves one first, and says so |
+| `AINODE_CLUSTER_SECRET=<value>` at install time | Pastes the master's value directly, for a node that will not join |
+
+<Note>
+Nothing already installed is touched. The installer writes `config.json` only
+when there is not one yet, so upgrading a node never changes its secret or
+its cluster membership.
+</Note>
+
+No HTTP route sets `cluster_secret`: `PATCH /api/config` rejects it. The writers
+are the installer on a fresh config, `ainode cluster token`, a join, or a hand
+edit followed by a restart.
+
+`GET /api/config` **pops** `cluster_secret` out of the payload, and `ainode config`
+prints it as `set (hidden)`.
+
+## What is not covered: replay
+
+A recorded datagram re-sent verbatim still verifies. It can only re-assert what a
+real node already said, because an attacker cannot edit a field without the key.
+The alternative, a freshness window over `timestamp`, would drop every
+announcement from a node whose clock has drifted, and the cluster shares no
+clock, so that trade is worse than the attack.
+
+## Size budget
+
+The listener reads at most **4096 bytes** per datagram. Measured on the live
+fleet with Spark-2 as a TP=2 head, the announcement it sends is **1016 bytes
+unsigned and 1097 signed**, leaving about 3000 bytes of headroom. The signature
+field is named `sig` rather than something readable precisely because every byte
+here is a byte a future field cannot have.
+
+## Versions on the wire
+
+The announcement also carries `ainode_version`, which is what makes a cluster
+split across two releases visible. See
+[Versions and the split banner](/cluster/versions).
+
+## The discovery port
+
+The port has one home in the code (`core.config.DEFAULT_DISCOVERY_PORT`), read by
+the config and by both discovery classes, and it is **5679**. Through 0.5.27 the
+`NodeConfig` default was 5678 while the installer wrote 5679, so a source
+install, or any node whose `config.json` predated the key, broadcast and listened
+where nobody else spoke: it came up healthy, served its own model, and never
+appeared in a single peer's cluster view, with no log line anywhere about the
+mismatch.
+
+The port, the cluster id and whether the wire is signed are now logged together
+at startup, so a mismatch is greppable at both ends. `ainode doctor` checks the
+configured port against the one the installer writes, and
+`ainode doctor --fix` writes the fleet port into `config.json`.
