@@ -20,6 +20,13 @@ OpenAI-compatible API and every management route (load a model, unload one,
 key answers everyone who can reach it.
 </Warning>
 
+<Note>
+**A key is for programs. A person signs in instead.** With auth on, the dashboard
+takes a name and a password and keeps a session, so nobody has to paste a shared
+secret into a browser. See [Sign in and accounts](/security/sign-in). Everything
+on this page still applies to every program that calls this node.
+</Note>
+
 ## What the installer does
 
 | Situation | What happens |
@@ -232,14 +239,16 @@ A wrong key gets a 401 with `Invalid API key`.
 
 ## The rule, and the paths that stay open
 
-**With auth enabled, every path under `/api` and `/v1` needs the key.** There are
-five exceptions and the static shell, each with a reason:
+**With auth enabled, every path under `/api` and `/v1` needs the key.** The
+exceptions are the static shell and these paths, each with a reason:
 
 | Path | Why it stays open |
 |---|---|
 | `/` and `/static/*` | The shell is files. Without it the browser cannot render the page that asks for a key |
 | `GET /api/health` | A liveness probe has no key. It carries the running `version`, which is what `ainode update` reads to verify a release on a node that requires one |
 | `GET /api/auth/status` | So the UI can say "this node wants a key" instead of rendering an empty page |
+| `GET /api/auth/me` | So the page can ask whether somebody is signed in. See [Sign in and accounts](/security/sign-in) |
+| `POST /api/auth/login` | The request that signs a person in cannot need a session first |
 | `GET /api/cluster/endpoint` | Node names, addresses and ports, nothing else. A client whose configured node is down has to be able to ask a reachable one where the rest of the fleet is, and the key it holds does not help it find an address. No model, no telemetry, no config, no key material |
 | `POST /api/cluster/join` | A node joining this cluster does not hold this cluster's key yet, so a single-use expiring [join token](/cluster/joining) is the credential instead. The route is rate limited to five attempts a minute per source address in place of a key |
 
