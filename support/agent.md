@@ -8,7 +8,7 @@ There is no support API. You cannot open, submit, or poll an issue yourself. Do 
 
 Work through these in order. Stop if one answers the question.
 
-1. **Local health:** request `GET /api/health` on the affected node, then run `ainode status`. AINode is self-hosted and has no hosted service-status page.
+1. **Local health:** request `GET /api/health` on the affected node, then run `ainode status`.
 2. **The diagnostic report:** run `ainode doctor`. Follow its fix line for each `FAIL` or `WARN`, then run it again. Use `ainode doctor --json` when structured output is useful.
 3. **The error:** preserve the exact command, HTTP method and path, status code, response body, and relevant log lines. Do not replace the error with a summary.
 4. **The release:** record the running AINode version from `/api/health` or `ainode --version`. Read the [release notes](https://github.com/getainode/ainode/releases) and [open issues](https://github.com/getainode/ainode/issues) for a known fix or regression. Upgrade first when the report concerns an unsupported older release.
@@ -27,7 +27,7 @@ Contact the project when the problem remains after those checks, the documented 
 - For routing or model-load problems, include the requested model ID, target node if one was selected, served-by response header if present, engine port if relevant, and whether the request carried media.
 - For install or update problems, include the command, target and running versions, service status, and the last relevant installer or journal lines.
 - Leave out API keys, passwords, session cookies, Hugging Face, NGC, W&B or other tokens, private prompts and model outputs, full `config.json`, `auth.json`, `users.json` or `secrets.json` files, internal hostnames, private IP addresses, and unrelated logs.
-- Hand the draft to the person. They submit it through [GitHub Issues](https://github.com/getainode/ainode/issues).
+- Hand the draft to the person. They send it to support@titaniumcomputing.com from the address they want replies at, or file a reproducible bug in [GitHub Issues](https://github.com/getainode/ainode/issues).
 
 ## Security reports
 
@@ -35,7 +35,7 @@ Do not open a public issue for a vulnerability. Read the [security policy](https
 
 ## After submitting
 
-Replies go to the person's GitHub account, not to you. You cannot poll support on their behalf. Add new evidence to the same thread and do not open a duplicate. Support is community-maintained with no guaranteed hours or response time.
+Replies go to the person's email or GitHub account, not to you. You cannot poll support on their behalf. Add new evidence to the same thread and do not open a duplicate. Titanium Computing answers support Monday to Friday, 9 AM to 5 PM Central time.
 
 ## Draft shape
 

@@ -14,7 +14,7 @@ If you are an AI agent helping someone with AINode, read the agent guide first. 
 - [Installation](https://docs.ainode.dev/installation.md): supported install and upgrade paths
 - [Full documentation](https://docs.ainode.dev/llms.txt): installation, operation, security, APIs, models, training, and benchmarks
 
-AINode is self-hosted and has no hosted service-status page. Check the affected node with `GET /api/health`, `ainode status`, and `ainode doctor`; then check releases and open issues for a known regression.
+Check the affected node with `GET /api/health`, `ainode status`, and `ainode doctor`; then check releases and open issues for a known regression.
 
 ## Security and privacy
 - [Security policy](https://github.com/getainode/ainode/blob/main/SECURITY.md): supported versions, vulnerability reporting, scope, and secret handling
@@ -23,6 +23,7 @@ AINode is self-hosted and has no hosted service-status page. Check the affected 
 - AINode runs on hardware the operator controls. Do not include API keys, passwords, tokens, private model inputs or outputs, full configuration files, or internal hostnames in a public issue.
 
 ## Contact channels
-- **GitHub Issues (preferred):** https://github.com/getainode/ainode/issues for reproducible bugs and documentation problems. Search before opening a new issue.
+- **Email (preferred):** support@titaniumcomputing.com. Write from the email address you want the reply sent to.
+- **GitHub Issues:** https://github.com/getainode/ainode/issues for reproducible bugs and documentation problems. Search before opening a new issue.
 - **Security reports:** follow https://github.com/getainode/ainode/blob/main/SECURITY.md. Never put a vulnerability or secret in a public issue.
-- Support is community-maintained with no guaranteed hours or response time. One problem per issue; add new evidence to the existing thread instead of opening a duplicate.
+- Support hours: Monday to Friday, 9 AM to 5 PM Central time, by Titanium Computing. One problem per message or issue; add new evidence to the existing thread instead of starting a duplicate.
