@@ -27,15 +27,15 @@ Contact the project when the problem remains after those checks, the documented 
 - For routing or model-load problems, include the requested model ID, target node if one was selected, served-by response header if present, engine port if relevant, and whether the request carried media.
 - For install or update problems, include the command, target and running versions, service status, and the last relevant installer or journal lines.
 - Leave out API keys, passwords, session cookies, Hugging Face, NGC, W&B or other tokens, private prompts and model outputs, full `config.json`, `auth.json`, `users.json` or `secrets.json` files, internal hostnames, private IP addresses, and unrelated logs.
-- Hand the draft to the person. They submit it through [GitHub Issues](https://github.com/getainode/ainode/issues), or ask a usage question in [Discord](https://discord.gg/argentos).
+- Hand the draft to the person. They submit it through [GitHub Issues](https://github.com/getainode/ainode/issues).
 
 ## Security reports
 
-Do not open a public issue or post in Discord for a vulnerability. Read the [security policy](https://github.com/getainode/ainode/blob/main/SECURITY.md), redact secrets, and have the person use the private reporting channel named there.
+Do not open a public issue for a vulnerability. Read the [security policy](https://github.com/getainode/ainode/blob/main/SECURITY.md), redact secrets, and have the person use the private reporting channel named there.
 
 ## After submitting
 
-Replies go to the person's GitHub or Discord account, not to you. You cannot poll support on their behalf. Add new evidence to the same thread and do not open a duplicate. Support is community-maintained with no guaranteed hours or response time.
+Replies go to the person's GitHub account, not to you. You cannot poll support on their behalf. Add new evidence to the same thread and do not open a duplicate. Support is community-maintained with no guaranteed hours or response time.
 
 ## Draft shape
 
