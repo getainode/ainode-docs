@@ -101,6 +101,12 @@
               "ops/metrics-retention",
               "ops/release-flow"
             ]
+          },
+          {
+            "group": "Support",
+            "pages": [
+              "support/agent"
+            ]
           }
         ]
       },
