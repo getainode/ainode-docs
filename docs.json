@@ -12,12 +12,7 @@
     "light": "#9DDE00",
     "dark": "#4A7A00"
   },
-  "topbarLinks": [
-    {
-      "name": "GitHub",
-      "url": "https://github.com/getainode/ainode"
-    }
-  ],
+  "topbarLinks": [],
   "topbarCtaButton": {
     "name": "Install Now",
     "url": "https://ainode.dev/#install"
@@ -29,14 +24,9 @@
       "url": "https://ainode.dev"
     },
     {
-      "name": "GitHub",
-      "icon": "github",
-      "url": "https://github.com/getainode/ainode"
-    },
-    {
       "name": "Releases",
       "icon": "tag",
-      "url": "https://github.com/getainode/ainode/releases"
+      "url": "https://github.com/orgs/getainode/packages/container/package/ainode"
     }
   ],
   "navigation": {
