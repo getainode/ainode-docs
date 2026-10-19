@@ -124,7 +124,7 @@ app cannot talk to a self-signed node at all.
 the container with `docker exec -it`, so `ainode tls enable --tailscale` and
 `ainode tls renew` over a non-TTY ssh die with *the input device is not a TTY*.
 Use `ssh -t`, or run them at the machine. Tracked as
-[issue 255](mailto:help@myagents.email).
+[issue 255](https://github.com/getainode/ainode/issues/255).
 </Warning>
 
 ## The certificate renews itself
@@ -306,7 +306,7 @@ the certificate covers.** A tailnet certificate is issued for one MagicDNS name,
 so an `https://10.0.0.7:3443` built from a LAN address will not validate against
 it. A client that wants HTTPS should reach the node by its MagicDNS name, which is
 also the address the row reports when the client already used it. Tracked as
-[issue 256](mailto:help@myagents.email).
+[issue 256](https://github.com/getainode/ainode/issues/256).
 </Warning>
 
 ## What reports the state

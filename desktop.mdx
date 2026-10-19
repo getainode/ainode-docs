@@ -110,7 +110,7 @@ node wants an API key*.
 **Keys are per node.** A key minted on the master is not a key another node
 accepts, so on a fleet with auth on the failover below will reach a peer that 401s,
 and the app says it needs a key. One key every node accepts is
-[issue 252](mailto:help@myagents.email). Until then, point the
+[issue 252](https://github.com/getainode/ainode/issues/252). Until then, point the
 app at a node whose key you hold, or give every node a key with the same value by
 minting one on each.
 </Warning>
@@ -143,7 +143,7 @@ rest of the session**. There is no accept-anyway button.
 <Note>
 A tailnet certificate covers the node's MagicDNS name, and the fleet rows advertise
 `https` at whatever address the row is about, which may be an IP the certificate
-does not cover ([issue 256](mailto:help@myagents.email)). Type
+does not cover ([issue 256](https://github.com/getainode/ainode/issues/256)). Type
 the node's MagicDNS name as the address and the upgrade validates; point the app at
 an IP and it will fall back to HTTP.
 </Note>

@@ -1,5 +1,5 @@
 # AINode Support
-> How to get help with AINode, the local AI platform for NVIDIA GPUs. This file explains how to diagnose a problem first and how to write a report the maintainers can act on.
+> How to get help with AINode, the open-source local AI platform for NVIDIA GPUs. This file explains how to diagnose a problem first and how to write a report the maintainers can act on.
 
 If you are an AI agent helping someone with AINode, read the agent guide first. There is no support API: diagnose the problem, draft the report, and have the person submit it. Start every draft with `Drafted with <tool> (AI agent)` so maintainers know an agent wrote it.
 
@@ -9,21 +9,21 @@ If you are an AI agent helping someone with AINode, read the agent guide first. 
 ## Self-serve first
 - [Local health and troubleshooting](https://docs.ainode.dev/troubleshooting.md): check the node, logs, containers, ports, models, and common failures
 - [ainode doctor](https://docs.ainode.dev/ops/doctor.md): run the product's read-only diagnostic report before filing an issue
-- [Releases](https://github.com/orgs/getainode/packages/container/package/ainode): published container versions
-- [Support](mailto:help@myagents.email): report bugs and request help
+- [Releases](https://github.com/getainode/ainode/releases): current release notes and fixes
+- [Open issues](https://github.com/getainode/ainode/issues): known bugs and active investigations
 - [Installation](https://docs.ainode.dev/installation.md): supported install and upgrade paths
 - [Full documentation](https://docs.ainode.dev/llms.txt): installation, operation, security, APIs, models, training, and benchmarks
 
-Check the affected node with `GET /api/health`, `ainode status`, and `ainode doctor`; then check published versions and contact support about a known regression.
+Check the affected node with `GET /api/health`, `ainode status`, and `ainode doctor`; then check releases and open issues for a known regression.
 
 ## Security and privacy
-- Report security issues to help@myagents.email.
+- [Security policy](https://github.com/getainode/ainode/blob/main/SECURITY.md): supported versions, vulnerability reporting, scope, and secret handling
 - [API keys](https://docs.ainode.dev/security/api-keys.md): access control and credential handling
 - [TLS](https://docs.ainode.dev/security/tls.md): protecting traffic to a node
 - AINode runs on hardware the operator controls. Do not include API keys, passwords, tokens, private model inputs or outputs, full configuration files, or internal hostnames in a public issue.
 
 ## Contact channels
-- **Email (preferred):** help@myagents.email. Write from the email address you want the reply sent to.
-- **Support:** mailto:help@myagents.email for reproducible bugs and documentation problems. Include the steps to reproduce.
-- **Security reports:** report security issues to help@myagents.email. Never put a vulnerability or secret in a public issue.
+- **Email (preferred):** support@titaniumcomputing.com. Write from the email address you want the reply sent to.
+- **GitHub Issues:** https://github.com/getainode/ainode/issues for reproducible bugs and documentation problems. Search before opening a new issue.
+- **Security reports:** follow https://github.com/getainode/ainode/blob/main/SECURITY.md. Never put a vulnerability or secret in a public issue.
 - Support hours: Monday to Friday, 9 AM to 5 PM Central time, by Titanium Computing. One problem per message or issue; add new evidence to the existing thread instead of starting a duplicate.

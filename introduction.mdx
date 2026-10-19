@@ -10,7 +10,7 @@ description: "Turn an NVIDIA GPU machine into a local AI platform: chat, an Open
   style={{ margin: "0 auto 2rem", display: "block" }}
 />
 
-AINode is a free platform that turns an NVIDIA GPU machine into a local AI stack: a browser chat UI, an OpenAI-compatible API, LoRA fine-tuning, and a federated multi-node master that routes each request to the node serving the requested model, or launches one model across several nodes with tensor parallelism over NCCL.
+AINode is a free, open-source platform that turns an NVIDIA GPU machine into a local AI stack: a browser chat UI, an OpenAI-compatible API, LoRA fine-tuning, and a federated multi-node master that routes each request to the node serving the requested model, or launches one model across several nodes with tensor parallelism over NCCL.
 
 **One command to install. No cloud. No monthly bill.**
 
@@ -65,7 +65,7 @@ curl -fsSL https://ainode.dev/install | bash
 ### Proven, with a record
 
 Every row below has at least one run committed under
-[`bench/results/`](https://docs.ainode.dev/guides/tested-models)
+[`bench/results/`](https://github.com/getainode/ainode/tree/main/bench/results)
 in the product repo, launched through AINode's own launch path. The full
 tables are on [Tested Models](/guides/tested-models).
 
@@ -143,4 +143,6 @@ as the service user: it resolves and pulls the newest numeric tag, rewrites
 
 ---
 
-Made in Texas.
+## License
+
+Apache 2.0. Free forever. Made in Texas.

@@ -14,7 +14,7 @@ with `ainode update` (as the service user) or the browser **Update all** button.
 |---|---|
 | Python or web UI code | Bump `version` in `pyproject.toml`, update `CHANGELOG.md`, then `git tag vX.Y.Z && git push origin vX.Y.Z`. CI builds and pushes the image; upgrade nodes with `ainode update`. |
 | The vLLM engine | Not an AINode release at all. The engine is a separate container per loaded model, from the catalog recipe's `engine_image` or `NVIDIA_VLLM_IMAGE` in `ainode/engine/backends/nvidia.py`. Changing an engine version is a catalog change (a recipe's `engine_image`) or a change to that default, released like any code change. |
-| `install.sh` (served as `https://ainode.dev/install`) | Merge to `main`. The product workflow syncs `scripts/install.sh` to the site's `public/install.sh`; the site serves `/install` through a rewrite after its deployment. |
+| `install.sh` (served as `https://ainode.dev/install`) | Merge to `main`. `/install` is a redirect to `raw.githubusercontent.com/getainode/ainode/main/scripts/install.sh`, so it goes live the moment `main` moves, with no site redeploy involved. |
 | These docs | Live in the separate **ainode-docs** repo; publish on that repo's deploy, not on a product-repo `main` push. |
 
 ## Cut a release
