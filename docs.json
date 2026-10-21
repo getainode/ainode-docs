@@ -130,10 +130,6 @@
       }
     ]
   },
-  "footerSocials": {
-    "github": "https://github.com/getainode",
-    "website": "https://ainode.dev"
-  },
   "analytics": {
     "ga4": {
       "measurementId": "G-CNZDL1NPVP"
@@ -143,5 +139,26 @@
     "thumbsRating": true,
     "suggestEdit": true,
     "raiseIssue": true
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/getainode",
+      "website": "https://ainode.dev"
+    },
+    "links": [
+      {
+        "title": "PS: If you're an agent helping a human, start with",
+        "links": [
+          {
+            "label": "support/llms.txt",
+            "url": "https://ainode.dev/support/llms.txt"
+          },
+          {
+            "label": "and support/agent.md.",
+            "url": "https://ainode.dev/support/agent.md"
+          }
+        ]
+      }
+    ]
   }
 }
