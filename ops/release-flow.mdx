@@ -3,21 +3,27 @@ title: "Release Flow"
 description: "How a new AINode version is built, published, and rolled out."
 ---
 
-Releases are **tag-driven**. Nobody builds or pushes the image by hand: pushing
-a `vX.Y.Z` git tag triggers CI on a self-hosted DGX Spark (aarch64) runner,
-which builds the product image and pushes it to GHCR. Operators then upgrade
+## Current public-source publication
+
+The public repository is a source snapshot. Its compatibility tags alias that snapshot, not historical source revisions, and it has no GitHub Releases. Publishing source does not rebuild existing GHCR images or upgrade installed nodes; source fixes are not thereby included in the existing 0.5.33 images.
+
+The public repository currently contains no CI workflows and GitHub Actions is disabled. The tag-triggered process below describes the earlier release workflow; it is not an active build or deployment path for the public repository. Installer updates require a separate reviewed sync PR to the site mirror and a site deployment.
+
+## Historical release process
+
+The earlier release process was **tag-driven**. In that workflow, pushing
+a `vX.Y.Z` git tag triggered CI on a self-hosted DGX Spark (aarch64) runner,
+which built the product image and pushed it to GHCR. Operators then upgraded
 with `ainode update` (as the service user) or the browser **Update all** button.
 
-## Decision tree
+## Historical decision tree
 
 | Change type | Action needed |
 |---|---|
 | Python or web UI code | Bump `version` in `pyproject.toml`, update `CHANGELOG.md`, then `git tag vX.Y.Z && git push origin vX.Y.Z`. CI builds and pushes the image; upgrade nodes with `ainode update`. |
 | The vLLM engine | Not an AINode release at all. The engine is a separate container per loaded model, from the catalog recipe's `engine_image` or `NVIDIA_VLLM_IMAGE` in `ainode/engine/backends/nvidia.py`. Changing an engine version is a catalog change (a recipe's `engine_image`) or a change to that default, released like any code change. |
-| `install.sh` (served as `https://ainode.dev/install`) | Merge to `main`. `/install` is a redirect to `raw.githubusercontent.com/getainode/ainode/main/scripts/install.sh`, so it goes live the moment `main` moves, with no site redeploy involved. |
+| `install.sh` (served as `https://ainode.dev/install`) | Merge to `main`. The earlier product workflow synced `scripts/install.sh` to the site's `public/install.sh`; the site serves `/install` through a rewrite after its deployment. |
 | These docs | Live in the separate **ainode-docs** repo; publish on that repo's deploy, not on a product-repo `main` push. |
-
-## Cut a release
 
 Bump **one** file, then tag. The version is single-sourced from package
 metadata, so there is exactly one literal to edit.
