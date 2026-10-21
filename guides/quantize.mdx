@@ -23,8 +23,7 @@ and no registry carries it, so build it once on the node (on an aarch64 GB10,
 where the base engine image is already pulled):
 
 ```bash
-# In an existing AINode source checkout:
-cd /path/to/ainode
+git clone https://github.com/getainode/ainode && cd ainode
 docker build -f scripts/Dockerfile.quant -t ainode-quant:0.17.0-t5 .
 ```
 
