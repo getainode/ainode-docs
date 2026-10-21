@@ -92,7 +92,7 @@ Any series over any window.
 
 | Parameter | Meaning |
 |---|---|
-| `node` | A node id or node name. Absent, or this node's own, answers from this node's store; any other name is fetched from that node. See [Any node's charts](#any-nodes-charts-from-any-node) |
+| `node` | A node id or node name. Absent, or this node's own, answers from this node's store; any other name is fetched from that node. See [Any node's charts](#any-node%E2%80%99s-charts-from-any-node) |
 | `series` | Comma-separated names, or the parameter repeated. Omitted means every series the store holds. Names are the flattened snapshot keys, for instance `gpu.temperature_c` or `requests.latency_ms.p95` |
 | `since` / `until` | A unix timestamp in seconds (milliseconds are accepted and divided, so a browser can pass `Date.now()`), or a relative offset from now with a leading minus and an optional unit: `-30m`, `-6h`, `-2d`. Units are `s`, `m`, `h`, `d`. Defaults are one hour ago and now |
 | `step` | Grid width in seconds, same optional unit suffix. Defaults to the sampling interval for raw data and one minute for roll-ups |
